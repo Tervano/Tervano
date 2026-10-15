@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/tervano/tervano"
-rust-version = "1.85"
+rust-version = "1.90"
 
 [workspace.dependencies]
 tervano-protocol = { path = "crates/protocol" }
