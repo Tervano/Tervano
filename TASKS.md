@@ -59,7 +59,7 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-116 | [ ] | | Rate limiting / body size limits / reconnect-storm backpressure | §14 |
 | T-117 | [ ] | | Run as Windows service + systemd unit + Dockerfile | §15 |
 | T-118 | [ ] | | Metrics endpoint (OpenTelemetry/Prometheus) incl. event volume | §14 |
-| T-119 | [ ] | | Record client IP in audit rows (`into_make_service_with_connect_info`) | |
+| T-119 | [~] | codex | Record client IP in audit rows (`into_make_service_with_connect_info`) | |
 
 ### Agent
 | ID | Status | Owner | Task | Notes / acceptance |
