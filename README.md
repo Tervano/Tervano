@@ -128,7 +128,7 @@ Phases from [PLAN.md](PLAN.md) §16, tracked in detail in [TASKS.md](TASKS.md):
 
 ## Security & privacy
 
-Intended model (PLAN §12): mutual authentication, TLS everywhere, per-operation authorization enforced on the agent, append-only audit, mandatory visible notification for any interactive remote session, classroom recording off by default. **Today** there is TLS (plaintext only on loopback), bearer-token authentication, hashed secrets on the server, a DPAPI-protected device secret on the agent, and an append-only audit log of enrollments and auth failures. Role-based access and mutual TLS are not implemented yet. Report vulnerabilities privately to the maintainers (SECURITY.md is T-012).
+Intended model (PLAN §12): mutual authentication, TLS everywhere, per-operation authorization enforced on the agent, append-only audit, mandatory visible notification for any interactive remote session, classroom recording off by default. **Today** the Server uses TLS off loopback, bearer-token authentication, hashed secrets, and a limited append-only audit log. The Windows Agent protects its device secret with DPAPI; direct Console→Agent connections use mutual TLS and a pinned Agent certificate. Role-based access and mutual TLS device identity to the Server remain planned. See the [current security model](docs/security-model.md) for trust boundaries and known gaps. Report vulnerabilities privately to the maintainers (SECURITY.md is T-012).
 
 ## License
 
