@@ -26,6 +26,11 @@ Server returns the highest applied sequence in `EventAck`. Agent timestamps are
 not trusted for retention: history uses Server receipt time. The metrics event
 counter includes accepted heartbeats and resets on process restart.
 
+The Server limits API and metrics requests per socket peer, with a separate
+enrollment rate. Excess requests return 429 with `Retry-After`; an in-flight
+work cap can return 503. At most 256 SSE streams are active at once. The
+[Server configuration](../apps/server/server.example.toml) sets the rate values.
+
 Technician tokens expire and can be rotated or revoked from the Server CLI. A
 long-lived SSE connection rechecks its token on notifications and at least
 every 15 seconds; rotation or revocation closes the old stream. The Console
@@ -37,7 +42,8 @@ The direct listener is HTTPS with mandatory client certificates from the
 Agent's configured technician CA. The Console checks a pinned Agent
 fingerprint before sending application requests. The current routes are
 `GET /v1/device`, process and service lists, event-log channel/event queries,
-hardware and software inventory, pending-reboot status, process termination, and service control/start-type
+hardware and software inventory, pending-reboot status, registry read/export,
+process termination, service control/start-type, and registry write/delete
 operations. Authorization is checked at the Agent for each operation: read access follows `allowed_technicians`, while changes need
 `operators`. [Direct implementation](../apps/agent/src/direct.rs) is the
 source for exact request bodies and route names. Server bearer tokens and their

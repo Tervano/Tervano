@@ -3,7 +3,7 @@
 use axum::{
     Extension, Json, Router,
     extract::{ConnectInfo, FromRequestParts, Path, Query, Request, State},
-    http::{StatusCode, header, request::Parts},
+    http::{HeaderValue, StatusCode, header, request::Parts},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -12,13 +12,14 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool, sqlite::SqliteConnectOptions};
 use std::{
+    collections::HashMap,
     net::{IpAddr, SocketAddr},
     str::FromStr,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tervano_protocol::*;
 use uuid::Uuid;
@@ -30,6 +31,8 @@ pub struct Config {
     pub database_url: String,
     pub offline_after_secs: u64,
     pub event_retention_days: u32,
+    pub requests_per_second: u32,
+    pub enrollments_per_minute: u32,
     /// PEM certificate chain and private key. Required unless `listen` is loopback.
     pub tls_cert: Option<std::path::PathBuf>,
     pub tls_key: Option<std::path::PathBuf>,
@@ -42,6 +45,8 @@ impl Default for Config {
             database_url: "sqlite://tervano.db?mode=rwc".into(),
             offline_after_secs: 180,
             event_retention_days: 30,
+            requests_per_second: 100,
+            enrollments_per_minute: 60,
             tls_cert: None,
             tls_key: None,
         }
@@ -70,6 +75,14 @@ impl Config {
             self.event_retention_days >= 1,
             "event_retention_days must be >= 1"
         );
+        anyhow::ensure!(
+            (1..=100_000).contains(&self.requests_per_second),
+            "requests_per_second must be 1-100000"
+        );
+        anyhow::ensure!(
+            (1..=100_000).contains(&self.enrollments_per_minute),
+            "enrollments_per_minute must be 1-100000"
+        );
         Ok(())
     }
 }
@@ -82,10 +95,93 @@ pub struct AppState {
     pub changes: tokio::sync::broadcast::Sender<Uuid>,
     accepted_events: Arc<AtomicU64>,
     started_at_seconds: i64,
+    limits: Arc<RequestLimits>,
+}
+
+const MAX_API_BODY: usize = 256 * 1024;
+const MAX_IN_FLIGHT: usize = 128;
+const MAX_STREAMS: usize = 256;
+const MAX_RATE_PEERS: usize = 65_536;
+
+#[derive(Clone, Copy, Hash, Eq, PartialEq)]
+enum RateClass {
+    Enrollment,
+    General,
+}
+
+struct RateWindow {
+    started: Instant,
+    count: u32,
+}
+
+struct RequestLimits {
+    peers: Mutex<HashMap<(IpAddr, RateClass), RateWindow>>,
+    requests_per_second: u32,
+    enrollments_per_minute: u32,
+    in_flight: Arc<tokio::sync::Semaphore>,
+    streams: Arc<tokio::sync::Semaphore>,
+}
+
+impl RequestLimits {
+    fn new(requests_per_second: u32, enrollments_per_minute: u32) -> Self {
+        Self {
+            peers: Mutex::new(HashMap::new()),
+            requests_per_second,
+            enrollments_per_minute,
+            in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT)),
+            streams: Arc::new(tokio::sync::Semaphore::new(MAX_STREAMS)),
+        }
+    }
+
+    fn admit(&self, peer: IpAddr, class: RateClass) -> bool {
+        let (window, max) = match class {
+            RateClass::Enrollment => (Duration::from_secs(60), self.enrollments_per_minute),
+            RateClass::General => (Duration::from_secs(1), self.requests_per_second),
+        };
+        let now = Instant::now();
+        let Ok(mut peers) = self.peers.lock() else {
+            return false;
+        };
+        let key = (peer, class);
+        if !peers.contains_key(&key) && peers.len() >= MAX_RATE_PEERS {
+            peers.retain(|(_, class), entry| {
+                let life = match class {
+                    RateClass::Enrollment => Duration::from_secs(60),
+                    RateClass::General => Duration::from_secs(1),
+                };
+                now.duration_since(entry.started) < life
+            });
+            if peers.len() >= MAX_RATE_PEERS {
+                return false;
+            }
+        }
+        let entry = peers.entry(key).or_insert(RateWindow {
+            started: now,
+            count: 0,
+        });
+        if now.duration_since(entry.started) >= window {
+            entry.started = now;
+            entry.count = 0;
+        }
+        if entry.count >= max {
+            return false;
+        }
+        entry.count += 1;
+        true
+    }
 }
 
 impl AppState {
     pub fn new(db: SqlitePool, offline_after_ms: i64) -> Self {
+        Self::with_rate_limits(db, offline_after_ms, 100, 60)
+    }
+
+    pub fn with_rate_limits(
+        db: SqlitePool,
+        offline_after_ms: i64,
+        requests_per_second: u32,
+        enrollments_per_minute: u32,
+    ) -> Self {
         // Bounded: a client that falls this far behind gets a `resync` instead of unbounded memory.
         let (changes, _) = tokio::sync::broadcast::channel(1024);
         Self {
@@ -94,6 +190,10 @@ impl AppState {
             changes,
             accepted_events: Arc::new(AtomicU64::new(0)),
             started_at_seconds: now_millis() / 1000,
+            limits: Arc::new(RequestLimits::new(
+                requests_per_second,
+                enrollments_per_minute,
+            )),
         }
     }
 
@@ -334,13 +434,50 @@ pub fn app(state: AppState) -> Router {
         .route("/stream", get(stream_changes))
         .layer(middleware::from_fn(require_protocol))
         // State JSON is small; this bounds memory per request.
-        .layer(axum::extract::DefaultBodyLimit::max(256 * 1024));
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_API_BODY));
     Router::new()
-        .route("/healthz", get(|| async { "ok" }))
-        .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
         .nest("/api/v1", api)
+        .layer(middleware::from_fn_with_state(state.clone(), admit_request))
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/readyz", get(readyz))
         .with_state(state)
+}
+
+async fn admit_request(State(s): State<AppState>, req: Request, next: Next) -> Response {
+    if req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|length| length > MAX_API_BODY)
+    {
+        return err(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
+    }
+    // ConnectInfo uses the socket peer. A reverse proxy needs its own client-aware limit.
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map_or(IpAddr::from([0, 0, 0, 0]), |info| info.0.ip());
+    let class = if req.uri().path().ends_with("/enroll") {
+        RateClass::Enrollment
+    } else {
+        RateClass::General
+    };
+    if !s.limits.admit(peer, class) {
+        let retry = if matches!(class, RateClass::Enrollment) {
+            "60"
+        } else {
+            "1"
+        };
+        return limited(StatusCode::TOO_MANY_REQUESTS, retry);
+    }
+    let Ok(permit) = s.limits.in_flight.clone().try_acquire_owned() else {
+        return limited(StatusCode::SERVICE_UNAVAILABLE, "1");
+    };
+    let response = next.run(req).await;
+    drop(permit);
+    response
 }
 
 async fn readyz(State(s): State<AppState>) -> StatusCode {
@@ -412,6 +549,14 @@ async fn require_protocol(req: Request, next: Next) -> Response {
 
 fn err(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(ApiError { error: msg.into() })).into_response()
+}
+
+fn limited(status: StatusCode, retry_after: &'static str) -> Response {
+    let mut response = err(status, "request limit reached");
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static(retry_after));
+    response
 }
 
 /// Boxed so `Result<_, AppError>` stays small (clippy::result_large_err).
@@ -819,18 +964,29 @@ fn primary_ip(addrs: &[NetAddress]) -> Option<String> {
 async fn stream_changes(
     State(s): State<AppState>,
     tech: TechAuth,
-) -> axum::response::sse::Sse<
-    impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+) -> Result<
+    axum::response::sse::Sse<
+        impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    AppError,
 > {
     use axum::response::sse::{Event, KeepAlive, Sse};
     use tokio_stream::wrappers::ReceiverStream;
+    let permit = s
+        .limits
+        .streams
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| AppError::new(limited(StatusCode::TOO_MANY_REQUESTS, "1")))?;
     let (sender, receiver) =
         tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(16);
     tokio::spawn(async move {
+        let _permit = permit;
         let mut changes = s.changes.subscribe();
         let mut recheck = tokio::time::interval(Duration::from_secs(15));
         loop {
             let outgoing = tokio::select! {
+                _ = sender.closed() => break,
                 _ = recheck.tick() => None,
                 result = changes.recv() => match result {
                     Ok(id) => Some(Event::default()
@@ -860,7 +1016,7 @@ async fn stream_changes(
             }
         }
     });
-    Sse::new(ReceiverStream::new(receiver)).keep_alive(KeepAlive::default())
+    Ok(Sse::new(ReceiverStream::new(receiver)).keep_alive(KeepAlive::default()))
 }
 
 #[derive(Deserialize)]

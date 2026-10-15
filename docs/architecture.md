@@ -26,8 +26,8 @@ searches. Device event snapshots use a configurable retention window.
 The Agent can run without `server_url`. Its direct listener requires a
 technician certificate from the configured CA. The Console pins the Agent's
 certificate fingerprint on first trusted contact. Device, process, service,
-event-log, hardware, software, and pending-reboot reads use `allowed_technicians`; machine-changing
-process/service operations require an explicit `operators` entry. Server technician API tokens do not authorize the
+event-log, hardware, software, pending-reboot, and registry reads use `allowed_technicians`; machine-changing
+process/service/registry operations require an explicit `operators` entry. Server technician API tokens do not authorize the
 direct channel. Service changes still await a successful elevated run
 ([T-701](../TASKS.md)).
 

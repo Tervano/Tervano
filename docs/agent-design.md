@@ -31,7 +31,8 @@ one-use token. Non-Windows secret protection is not equivalent to DPAPI.
 self-generated Agent certificate and required technician client certificates.
 The Console verifies and pins the Agent fingerprint. Read operations include
 device state, process/service lists, event-log queries, hardware and software
-inventory, and pending-reboot status. Process termination and service changes require the technician name in `operators`; an empty list permits no changing
+inventory, pending-reboot status, and registry keys/values. Process termination,
+service changes, and registry writes require the technician name in `operators`; an empty list permits no changing
 operation. An empty `allowed_technicians` list permits any valid certificate
 from the configured CA to use read operations. Each authorization decision is
 logged locally. Service changes still need elevated end-to-end verification

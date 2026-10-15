@@ -24,6 +24,16 @@ content may be needed. Stop the Server before file-based backup or use a
 SQLite-aware online backup, then verify restore. Protect database, WAL,
 backups, and TLS keys with OS access controls.
 
+`requests_per_second` defaults to 100 per socket peer; enrollment has a
+separate `enrollments_per_minute` limit of 60. Raise these values for large
+deployments sharing a peer address. The Server also caps in-flight protected
+requests at 128 and active SSE streams at 256. Excess requests return 429 or
+503 with `Retry-After`; API JSON bodies are capped at 256 KiB. Health and
+readiness checks remain available during request limiting. A reverse proxy
+appears as one peer to the Server, so enforce client-aware limits at the proxy
+and size the Server limits for its aggregate traffic. Do not trust unverified
+forwarded IP headers for admission decisions.
+
 ## Credentials and monitoring
 
 `tervano-server token create` issues a use-limited enrollment token. New

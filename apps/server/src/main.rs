@@ -143,7 +143,12 @@ async fn main() -> anyhow::Result<()> {
     match cli.cmd {
         Cmd::Serve => {
             let addr: std::net::SocketAddr = cfg.listen.parse()?;
-            let state = AppState::new(db, cfg.offline_after_secs as i64 * 1000);
+            let state = AppState::with_rate_limits(
+                db,
+                cfg.offline_after_secs as i64 * 1000,
+                cfg.requests_per_second,
+                cfg.enrollments_per_minute,
+            );
             spawn_offline_sweeper(state.clone());
             spawn_event_purger(state.db.clone(), cfg.event_retention_days);
             let router = app(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
