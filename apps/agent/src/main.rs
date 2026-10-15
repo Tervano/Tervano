@@ -5,6 +5,7 @@ mod inventory;
 mod processes;
 #[cfg(windows)]
 mod reg;
+mod registry;
 mod secure;
 #[cfg(windows)]
 mod service;

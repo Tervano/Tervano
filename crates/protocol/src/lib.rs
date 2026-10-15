@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.7";
+pub const PROTOCOL_VERSION: &str = "1.8";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -330,6 +330,93 @@ pub struct InstalledApp {
     pub uninstall_key: String,
     pub msi: bool,
     pub has_uninstaller: bool,
+}
+
+/// Registry roots the agent exposes. HKCU is deliberately absent: the agent runs as SYSTEM, so
+/// a user's hive is reached through HKU\<SID>.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RegHive {
+    #[serde(rename = "HKLM")]
+    LocalMachine,
+    #[serde(rename = "HKU")]
+    Users,
+    #[serde(rename = "HKCR")]
+    ClassesRoot,
+    #[serde(rename = "HKCC")]
+    CurrentConfig,
+}
+
+/// Registry view on 64-bit Windows; `bits64` is what 64-bit programs see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegView {
+    #[default]
+    Bits64,
+    Bits32,
+}
+
+/// A registry key location, used as query string or request body.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegKeyPath {
+    pub hive: RegHive,
+    /// Backslash-separated, no leading backslash; empty for the hive root.
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub view: RegView,
+}
+
+/// A typed registry value. Unusual types round-trip as `other` (raw bytes, hex).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum RegData {
+    String(String),
+    ExpandString(String),
+    MultiString(Vec<String>),
+    Dword(u32),
+    Qword(u64),
+    /// Hex-encoded bytes.
+    Binary(String),
+    None,
+    Other {
+        type_id: u32,
+        hex: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegValue {
+    /// Empty string = the key's default value.
+    pub name: String,
+    pub data: RegData,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegKeyContents {
+    pub subkeys: Vec<String>,
+    pub values: Vec<RegValue>,
+}
+
+/// Body of `POST /v1/registry/value` (creates the key if needed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegSetValueRequest {
+    pub key: RegKeyPath,
+    pub name: String,
+    pub data: RegData,
+}
+
+/// Body of `POST /v1/registry/value/delete`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegDeleteValueRequest {
+    pub key: RegKeyPath,
+    pub name: String,
+}
+
+/// Body of `POST /v1/registry/key/delete`. A key with subkeys is only deleted when `recursive`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegDeleteKeyRequest {
+    pub key: RegKeyPath,
+    pub recursive: bool,
 }
 
 /// SSE event names on `GET /api/v1/stream`.

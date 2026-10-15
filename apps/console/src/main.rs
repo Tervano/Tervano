@@ -5,8 +5,8 @@ mod api;
 mod direct;
 
 use iced::widget::{
-    Space, button, column, container, pick_list, progress_bar, row, rule, scrollable, text,
-    text_input,
+    Space, button, checkbox, column, container, pick_list, progress_bar, row, rule, scrollable,
+    text, text_input,
 };
 use iced::{Alignment, Color, Element, Length, Subscription, Task, Theme};
 use serde::{Deserialize, Serialize};
@@ -138,6 +138,186 @@ enum Message {
     HwLoaded(String, Result<HardwareInventory, String>),
     SwLoaded(String, Result<SoftwareInventory, String>),
     SwFilter(String),
+    RegHive(HiveChoice),
+    RegBits32(bool),
+    RegPathInput(String),
+    RegGo,
+    RegUp,
+    RegOpen(String),
+    RegLoaded(String, Result<RegKeyContents, String>),
+    RegFormName(String),
+    RegFormType(RegType),
+    RegFormData(String),
+    RegEdit(RegValue),
+    RegAskSet,
+    RegAskDeleteValue(String),
+    RegAskDeleteKey,
+    RegRecursive(bool),
+    RegConfirm,
+    RegCancel,
+    RegDone(Result<String, String>),
+    RegExport,
+    RegExported(Result<String, String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HiveChoice(RegHive);
+
+impl std::fmt::Display for HiveChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(hive_label(self.0))
+    }
+}
+
+const HIVES: [HiveChoice; 4] = [
+    HiveChoice(RegHive::LocalMachine),
+    HiveChoice(RegHive::Users),
+    HiveChoice(RegHive::ClassesRoot),
+    HiveChoice(RegHive::CurrentConfig),
+];
+
+fn hive_label(h: RegHive) -> &'static str {
+    match h {
+        RegHive::LocalMachine => "HKEY_LOCAL_MACHINE",
+        RegHive::Users => "HKEY_USERS",
+        RegHive::ClassesRoot => "HKEY_CLASSES_ROOT",
+        RegHive::CurrentConfig => "HKEY_CURRENT_CONFIG",
+    }
+}
+
+/// Value types the edit form can write.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RegType {
+    String,
+    ExpandString,
+    MultiString,
+    Dword,
+    Qword,
+    Binary,
+}
+
+impl std::fmt::Display for RegType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            RegType::String => "REG_SZ",
+            RegType::ExpandString => "REG_EXPAND_SZ",
+            RegType::MultiString => "REG_MULTI_SZ",
+            RegType::Dword => "REG_DWORD",
+            RegType::Qword => "REG_QWORD",
+            RegType::Binary => "REG_BINARY",
+        })
+    }
+}
+
+const REG_TYPES: [RegType; 6] = [
+    RegType::String,
+    RegType::ExpandString,
+    RegType::MultiString,
+    RegType::Dword,
+    RegType::Qword,
+    RegType::Binary,
+];
+
+/// Type label and editable text for a value (multi-strings joined with `|`).
+fn reg_display(d: &RegData) -> (String, String) {
+    match d {
+        RegData::String(s) => ("REG_SZ".into(), s.clone()),
+        RegData::ExpandString(s) => ("REG_EXPAND_SZ".into(), s.clone()),
+        RegData::MultiString(v) => ("REG_MULTI_SZ".into(), v.join("|")),
+        RegData::Dword(v) => ("REG_DWORD".into(), format!("0x{v:08x} ({v})")),
+        RegData::Qword(v) => ("REG_QWORD".into(), format!("0x{v:016x} ({v})")),
+        RegData::Binary(h) => ("REG_BINARY".into(), h.clone()),
+        RegData::None => ("REG_NONE".into(), String::new()),
+        RegData::Other { type_id, hex } => (format!("type {type_id}"), hex.clone()),
+    }
+}
+
+/// Parses the edit form into typed data.
+fn reg_parse(ty: RegType, s: &str) -> Result<RegData, String> {
+    let num = |s: &str| -> Result<u64, String> {
+        let s = s.trim();
+        // Accept what reg_display shows: "0x.. (dec)" → take the hex part.
+        let s = s.split_whitespace().next().unwrap_or("");
+        match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            Some(h) => u64::from_str_radix(h, 16),
+            None => s.parse(),
+        }
+        .map_err(|_| format!("{s:?} is not a number (decimal or 0x-hex)"))
+    };
+    Ok(match ty {
+        RegType::String => RegData::String(s.to_owned()),
+        RegType::ExpandString => RegData::ExpandString(s.to_owned()),
+        RegType::MultiString => RegData::MultiString(
+            s.split('|')
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        ),
+        RegType::Dword => RegData::Dword(
+            u32::try_from(num(s)?).map_err(|_| "value does not fit in a DWORD".to_string())?,
+        ),
+        RegType::Qword => RegData::Qword(num(s)?),
+        RegType::Binary => {
+            let h: String = s
+                .chars()
+                .filter(|c| !c.is_whitespace() && *c != ',')
+                .collect();
+            if !h.len().is_multiple_of(2) || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err("binary data must be hex bytes, e.g. de ad be ef".into());
+            }
+            RegData::Binary(h.to_lowercase())
+        }
+    })
+}
+
+/// A registry change awaiting confirmation.
+#[derive(Debug, Clone)]
+enum RegChange {
+    Set(RegSetValueRequest),
+    DeleteValue(RegDeleteValueRequest),
+    DeleteKey(RegDeleteKeyRequest),
+}
+
+fn reg_where(k: &RegKeyPath) -> String {
+    let view = if k.view == RegView::Bits32 {
+        " (32-bit view)"
+    } else {
+        ""
+    };
+    format!("{}\\{}{view}", hive_label(k.hive), k.path)
+}
+
+impl RegChange {
+    fn describe(&self) -> String {
+        let name = |n: &str| {
+            if n.is_empty() {
+                "(Default)".to_owned()
+            } else {
+                n.to_owned()
+            }
+        };
+        match self {
+            RegChange::Set(r) => format!(
+                "Set {} = {} in {}",
+                name(&r.name),
+                reg_display(&r.data).1,
+                reg_where(&r.key)
+            ),
+            RegChange::DeleteValue(r) => {
+                format!("Delete value {} from {}", name(&r.name), reg_where(&r.key))
+            }
+            RegChange::DeleteKey(r) => format!(
+                "Delete key {}{}",
+                reg_where(&r.key),
+                if r.recursive {
+                    " and everything below it"
+                } else {
+                    ""
+                }
+            ),
+        }
+    }
 }
 
 /// Level filter for the Events tab: `None` = any.
@@ -244,6 +424,7 @@ enum DirectTab {
     Events,
     Hardware,
     Software,
+    Registry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -310,6 +491,18 @@ struct Console {
     hw: Option<(String, Result<HardwareInventory, String>)>,
     sw: Option<(String, Result<SoftwareInventory, String>)>,
     sw_filter: String,
+    reg_hive: RegHive,
+    reg_bits32: bool,
+    /// Key currently shown (path within the hive).
+    reg_path: String,
+    reg_path_input: String,
+    reg: Option<(String, Result<RegKeyContents, String>)>,
+    reg_form_name: String,
+    reg_form_type: RegType,
+    reg_form_data: String,
+    reg_recursive: bool,
+    reg_confirm: Option<RegChange>,
+    reg_notice: Option<Result<String, String>>,
 }
 
 impl Console {
@@ -364,6 +557,17 @@ impl Console {
             hw: None,
             sw: None,
             sw_filter: String::new(),
+            reg_hive: RegHive::LocalMachine,
+            reg_bits32: false,
+            reg_path: r"SOFTWARE\Microsoft\Windows NT\CurrentVersion".into(),
+            reg_path_input: r"SOFTWARE\Microsoft\Windows NT\CurrentVersion".into(),
+            reg: None,
+            reg_form_name: String::new(),
+            reg_form_type: RegType::String,
+            reg_form_data: String::new(),
+            reg_recursive: false,
+            reg_confirm: None,
+            reg_notice: None,
         };
         let task = if configured { c.search() } else { Task::none() };
         (c, task)
@@ -452,6 +656,9 @@ impl Console {
             }),
             DirectTab::Software => Task::perform(direct::software(t), move |r| {
                 Message::SwLoaded(addr.clone(), r)
+            }),
+            DirectTab::Registry => Task::perform(direct::reg_key(t, self.reg_key()), move |r| {
+                Message::RegLoaded(addr.clone(), r)
             }),
         };
         Task::batch([device, tab])
@@ -580,6 +787,9 @@ impl Console {
                     self.evt_notice = None;
                     self.hw = None;
                     self.sw = None;
+                    self.reg = None;
+                    self.reg_confirm = None;
+                    self.reg_notice = None;
                 }
                 self.direct_selected = Some(address.clone());
                 return self.load_direct(&address);
@@ -690,6 +900,147 @@ impl Console {
                 }
             }
             Message::SwFilter(f) => self.sw_filter = f,
+            Message::RegHive(h) => {
+                self.reg_hive = h.0;
+                return self.reg_navigate(String::new());
+            }
+            Message::RegBits32(b) => {
+                self.reg_bits32 = b;
+                return self.reg_navigate(self.reg_path.clone());
+            }
+            Message::RegPathInput(p) => self.reg_path_input = p,
+            Message::RegGo => {
+                let p = self.reg_path_input.trim().trim_matches('\\').to_owned();
+                // Accept pasted full paths like "HKEY_LOCAL_MACHINE\SOFTWARE\…".
+                let (hive, rest) = match p.split_once('\\') {
+                    Some((h, r)) => (h, r),
+                    None => (p.as_str(), ""),
+                };
+                let found = HIVES.iter().find(|c| {
+                    let l = hive_label(c.0);
+                    hive.eq_ignore_ascii_case(l)
+                        || hive.eq_ignore_ascii_case(&l.replace("HKEY_", "HK").replace('_', ""))
+                        || (c.0 == RegHive::LocalMachine && hive.eq_ignore_ascii_case("HKLM"))
+                        || (c.0 == RegHive::Users && hive.eq_ignore_ascii_case("HKU"))
+                        || (c.0 == RegHive::ClassesRoot && hive.eq_ignore_ascii_case("HKCR"))
+                        || (c.0 == RegHive::CurrentConfig && hive.eq_ignore_ascii_case("HKCC"))
+                });
+                let path = match found {
+                    Some(c) => {
+                        self.reg_hive = c.0;
+                        rest.to_owned()
+                    }
+                    None => p,
+                };
+                return self.reg_navigate(path);
+            }
+            Message::RegUp => {
+                let up = self
+                    .reg_path
+                    .rsplit_once('\\')
+                    .map_or(String::new(), |(p, _)| p.to_owned());
+                return self.reg_navigate(up);
+            }
+            Message::RegOpen(sub) => {
+                let p = if self.reg_path.is_empty() {
+                    sub
+                } else {
+                    format!("{}\\{sub}", self.reg_path)
+                };
+                return self.reg_navigate(p);
+            }
+            Message::RegLoaded(address, r) => {
+                if self.direct_selected.as_deref() == Some(address.as_str()) {
+                    self.reg = Some((address, r));
+                }
+            }
+            Message::RegFormName(n) => self.reg_form_name = n,
+            Message::RegFormType(t) => self.reg_form_type = t,
+            Message::RegFormData(d) => self.reg_form_data = d,
+            Message::RegEdit(v) => {
+                self.reg_form_name = v.name.clone();
+                self.reg_form_type = match v.data {
+                    RegData::ExpandString(_) => RegType::ExpandString,
+                    RegData::MultiString(_) => RegType::MultiString,
+                    RegData::Dword(_) => RegType::Dword,
+                    RegData::Qword(_) => RegType::Qword,
+                    RegData::Binary(_) | RegData::Other { .. } | RegData::None => RegType::Binary,
+                    RegData::String(_) => RegType::String,
+                };
+                self.reg_form_data = reg_display(&v.data).1;
+            }
+            Message::RegAskSet => match reg_parse(self.reg_form_type, &self.reg_form_data) {
+                Ok(data) => {
+                    self.reg_notice = None;
+                    self.reg_confirm = Some(RegChange::Set(RegSetValueRequest {
+                        key: self.reg_key(),
+                        name: self.reg_form_name.clone(),
+                        data,
+                    }));
+                }
+                Err(e) => self.reg_notice = Some(Err(e)),
+            },
+            Message::RegAskDeleteValue(name) => {
+                self.reg_notice = None;
+                self.reg_confirm = Some(RegChange::DeleteValue(RegDeleteValueRequest {
+                    key: self.reg_key(),
+                    name,
+                }));
+            }
+            Message::RegAskDeleteKey => {
+                self.reg_notice = None;
+                self.reg_confirm = Some(RegChange::DeleteKey(RegDeleteKeyRequest {
+                    key: self.reg_key(),
+                    recursive: self.reg_recursive,
+                }));
+            }
+            Message::RegRecursive(b) => self.reg_recursive = b,
+            Message::RegCancel => self.reg_confirm = None,
+            Message::RegConfirm => {
+                if let (Some(change), Some(t)) = (
+                    self.reg_confirm.take(),
+                    self.direct_selected.as_deref().and_then(|a| self.target(a)),
+                ) {
+                    let done = change.describe();
+                    let deleted_key = matches!(change, RegChange::DeleteKey(_));
+                    let to_msg = move |r: Result<(), String>| {
+                        Message::RegDone(r.map(|()| format!("Done: {done}.")))
+                    };
+                    if deleted_key {
+                        // Show the parent once the key is gone.
+                        self.reg_path = self
+                            .reg_path
+                            .rsplit_once('\\')
+                            .map_or(String::new(), |(p, _)| p.to_owned());
+                        self.reg_path_input = self.reg_path.clone();
+                    }
+                    return match change {
+                        RegChange::Set(r) => Task::perform(direct::reg_set(t, r), to_msg),
+                        RegChange::DeleteValue(r) => {
+                            Task::perform(direct::reg_delete_value(t, r), to_msg)
+                        }
+                        RegChange::DeleteKey(r) => {
+                            Task::perform(direct::reg_delete_key(t, r), to_msg)
+                        }
+                    };
+                }
+            }
+            Message::RegDone(r) => {
+                self.reg_notice = Some(r);
+                if let Some(addr) = self.direct_selected.clone() {
+                    return self.load_direct(&addr);
+                }
+            }
+            Message::RegExport => {
+                if let Some(t) = self.direct_selected.as_deref().and_then(|a| self.target(a)) {
+                    let k = self.reg_key();
+                    let label = format!("{}-{}", t.address, k.path);
+                    return Task::perform(direct::reg_export(t, k), move |r| {
+                        Message::RegExported(r.and_then(|text| save_reg_file(&label, &text)))
+                    });
+                }
+            }
+            Message::RegExported(r) => self.reg_notice = Some(r),
             Message::KillDone(r) => {
                 self.kill_notice = Some(r);
                 if let Some(addr) = self.direct_selected.clone() {
@@ -1068,6 +1419,7 @@ impl Console {
                             DirectTab::Events => self.evts_view(),
                             DirectTab::Hardware => self.hw_view(),
                             DirectTab::Software => self.sw_view(),
+                            DirectTab::Registry => self.reg_view(),
                         };
                         column![
                             row![
@@ -1076,7 +1428,8 @@ impl Console {
                                 tab("Services", DirectTab::Services),
                                 tab("Events", DirectTab::Events),
                                 tab("Hardware", DirectTab::Hardware),
-                                tab("Software", DirectTab::Software)
+                                tab("Software", DirectTab::Software),
+                                tab("Registry", DirectTab::Registry)
                             ]
                             .spacing(6),
                             body
@@ -1103,6 +1456,186 @@ impl Console {
             }
         };
         column![top, content].spacing(12).into()
+    }
+
+    fn reg_key(&self) -> RegKeyPath {
+        RegKeyPath {
+            hive: self.reg_hive,
+            path: self.reg_path.clone(),
+            view: if self.reg_bits32 {
+                RegView::Bits32
+            } else {
+                RegView::Bits64
+            },
+        }
+    }
+
+    fn reg_navigate(&mut self, path: String) -> Task<Message> {
+        self.reg_path = path;
+        self.reg_path_input = self.reg_path.clone();
+        self.reg = None;
+        self.reg_confirm = None;
+        match self.direct_selected.clone() {
+            Some(addr) => self.load_direct(&addr),
+            None => Task::none(),
+        }
+    }
+
+    fn reg_view(&self) -> Element<'_, Message> {
+        let nav = row![
+            pick_list(HIVES, Some(HiveChoice(self.reg_hive)), Message::RegHive).text_size(13),
+            text_input("Key path, e.g. SOFTWARE\\Microsoft", &self.reg_path_input)
+                .on_input(Message::RegPathInput)
+                .on_submit(Message::RegGo)
+                .padding(6),
+            button(text("Go"))
+                .style(button::secondary)
+                .on_press(Message::RegGo),
+            button(text("Up"))
+                .style(button::secondary)
+                .on_press_maybe((!self.reg_path.is_empty()).then_some(Message::RegUp)),
+            checkbox(self.reg_bits32)
+                .label("32-bit view")
+                .on_toggle(Message::RegBits32),
+            button(text("Export .reg"))
+                .style(button::secondary)
+                .on_press(Message::RegExport),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+
+        let mut col = column![nav].spacing(8);
+        if let Some(change) = &self.reg_confirm {
+            col = col.push(
+                container(
+                    column![
+                        text(format!("{}?", change.describe())),
+                        row![
+                            button(text("Confirm"))
+                                .style(button::danger)
+                                .on_press(Message::RegConfirm),
+                            button(text("Cancel"))
+                                .style(button::secondary)
+                                .on_press(Message::RegCancel),
+                        ]
+                        .spacing(8),
+                    ]
+                    .spacing(8),
+                )
+                .padding(10)
+                .width(Length::Fill)
+                .style(container::bordered_box),
+            );
+        }
+        if let Some(n) = &self.reg_notice {
+            col = col.push(match n {
+                Ok(m) => text(m.clone()).size(13).style(text::success),
+                Err(e) => text(e.clone()).size(13).style(text::danger),
+            });
+        }
+        let contents = match &self.reg {
+            None => return col.push(centered("Reading key…")).into(),
+            Some((_, Err(e))) => return col.push(error_box(e)).into(),
+            Some((_, Ok(c))) => c,
+        };
+
+        let subkeys = contents.subkeys.iter().fold(column![].spacing(1), |c, k| {
+            c.push(
+                button(text(format!("▸ {k}")).size(13))
+                    .style(button::text)
+                    .padding([2, 4])
+                    .width(Length::Fill)
+                    .on_press(Message::RegOpen(k.clone())),
+            )
+        });
+        let values = contents.values.iter().fold(column![].spacing(2), |c, v| {
+            let (ty, shown) = reg_display(&v.data);
+            c.push(
+                row![
+                    text(if v.name.is_empty() {
+                        "(Default)"
+                    } else {
+                        &v.name
+                    })
+                    .size(13)
+                    .width(Length::FillPortion(3)),
+                    text(ty)
+                        .size(12)
+                        .style(text::secondary)
+                        .width(Length::FillPortion(2)),
+                    text(shown.chars().take(200).collect::<String>())
+                        .size(13)
+                        .width(Length::FillPortion(5)),
+                    button(text("Edit").size(12))
+                        .style(button::subtle)
+                        .padding([2, 6])
+                        .on_press(Message::RegEdit(v.clone())),
+                    button(text("Delete").size(12))
+                        .style(button::subtle)
+                        .padding([2, 6])
+                        .on_press(Message::RegAskDeleteValue(v.name.clone())),
+                ]
+                .spacing(4)
+                .align_y(Alignment::Center),
+            )
+        });
+        let form = row![
+            text_input("Value name (empty = default)", &self.reg_form_name)
+                .on_input(Message::RegFormName)
+                .padding(6)
+                .width(Length::FillPortion(3)),
+            pick_list(REG_TYPES, Some(self.reg_form_type), Message::RegFormType).text_size(13),
+            text_input(
+                match self.reg_form_type {
+                    RegType::MultiString => "Entries separated by |",
+                    RegType::Dword | RegType::Qword => "Decimal or 0x-hex",
+                    RegType::Binary => "Hex bytes, e.g. de ad be ef",
+                    _ => "Data",
+                },
+                &self.reg_form_data
+            )
+            .on_input(Message::RegFormData)
+            .on_submit(Message::RegAskSet)
+            .padding(6)
+            .width(Length::FillPortion(4)),
+            button(text("Set value"))
+                .style(button::primary)
+                .on_press(Message::RegAskSet),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        let key_actions = row![
+            checkbox(self.reg_recursive)
+                .label("include subkeys")
+                .on_toggle(Message::RegRecursive),
+            button(text("Delete this key").size(12))
+                .style(button::danger)
+                .on_press_maybe((!self.reg_path.is_empty()).then_some(Message::RegAskDeleteKey)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+        col.push(
+            row![
+                container(scrollable(subkeys).height(Length::Fill))
+                    .width(Length::FillPortion(1))
+                    .style(container::bordered_box)
+                    .padding(4),
+                column![
+                    text(format!("{} values", contents.values.len()))
+                        .size(12)
+                        .style(text::secondary),
+                    scrollable(values).height(Length::Fill),
+                    form,
+                    key_actions,
+                ]
+                .spacing(6)
+                .width(Length::FillPortion(3)),
+            ]
+            .spacing(8)
+            .height(Length::Fill),
+        )
+        .into()
     }
 
     fn sw_view(&self) -> Element<'_, Message> {
@@ -1894,6 +2427,21 @@ fn state_panel<'a>(
         .spacing(8),
     )
     .into()
+}
+
+/// Saves `.reg` text the way regedit expects it (UTF-16LE with BOM) into Downloads.
+fn save_reg_file(label: &str, text: &str) -> Result<String, String> {
+    let dir = downloads_dir().ok_or("USERPROFILE not set")?;
+    let safe: String = label
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .take(80)
+        .collect();
+    let path = dir.join(format!("tervano-{safe}-{}.reg", now_millis()));
+    let mut bytes = vec![0xFF, 0xFE];
+    bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    std::fs::write(&path, bytes).map_err(|e| format!("Export failed: {e}"))?;
+    Ok(format!("Exported to {}", path.display()))
 }
 
 fn downloads_dir() -> Option<std::path::PathBuf> {

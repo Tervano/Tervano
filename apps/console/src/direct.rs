@@ -296,3 +296,49 @@ pub async fn hardware(t: Target) -> Result<HardwareInventory, String> {
 pub async fn software(t: Target) -> Result<SoftwareInventory, String> {
     json(send(&t, |c, base| c.get(format!("{base}/v1/inventory/software"))).await?).await
 }
+
+pub async fn reg_key(t: Target, k: RegKeyPath) -> Result<RegKeyContents, String> {
+    json(
+        send(&t, |c, base| {
+            c.get(format!("{base}/v1/registry/key")).query(&k)
+        })
+        .await?,
+    )
+    .await
+}
+
+/// `.reg` text of the key and everything below it.
+pub async fn reg_export(t: Target, k: RegKeyPath) -> Result<String, String> {
+    json(
+        send(&t, |c, base| {
+            c.get(format!("{base}/v1/registry/export")).query(&k)
+        })
+        .await?,
+    )
+    .await
+}
+
+pub async fn reg_set(t: Target, req: RegSetValueRequest) -> Result<(), String> {
+    send(&t, |c, base| {
+        c.post(format!("{base}/v1/registry/value")).json(&req)
+    })
+    .await
+    .map(|_| ())
+}
+
+pub async fn reg_delete_value(t: Target, req: RegDeleteValueRequest) -> Result<(), String> {
+    send(&t, |c, base| {
+        c.post(format!("{base}/v1/registry/value/delete"))
+            .json(&req)
+    })
+    .await
+    .map(|_| ())
+}
+
+pub async fn reg_delete_key(t: Target, req: RegDeleteKeyRequest) -> Result<(), String> {
+    send(&t, |c, base| {
+        c.post(format!("{base}/v1/registry/key/delete")).json(&req)
+    })
+    .await
+    .map(|_| ())
+}

@@ -5,7 +5,9 @@
 //! certificate, which consoles pin by SHA-256 fingerprint (`TervanoAgent direct-fingerprint`).
 //! Authorization is checked here, per operation, never just in the Console (PLAN §12.9).
 
-use crate::{collect, eventlog, inventory, processes::Processes, secure, services, software};
+use crate::{
+    collect, eventlog, inventory, processes::Processes, registry, secure, services, software,
+};
 use anyhow::Context;
 use axum::{
     Extension, Json, Router,
@@ -65,6 +67,8 @@ enum Op {
     SetServiceStartType,
     ReadEventLog,
     ReadInventory,
+    ReadRegistry,
+    WriteRegistry,
 }
 
 impl Op {
@@ -78,6 +82,8 @@ impl Op {
             Op::SetServiceStartType => "service.start_type",
             Op::ReadEventLog => "eventlog.read",
             Op::ReadInventory => "inventory.read",
+            Op::ReadRegistry => "registry.read",
+            Op::WriteRegistry => "registry.write",
         }
     }
 
@@ -85,7 +91,7 @@ impl Op {
     fn changes_machine(self) -> bool {
         matches!(
             self,
-            Op::KillProcess | Op::ControlService | Op::SetServiceStartType
+            Op::KillProcess | Op::ControlService | Op::SetServiceStartType | Op::WriteRegistry
         )
     }
 }
@@ -402,6 +408,89 @@ async fn software_inventory(
     Ok(Json(blocking(software::inventory).await?))
 }
 
+async fn registry_key(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+    Query(k): Query<RegKeyPath>,
+) -> ApiResult<Json<RegKeyContents>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::ReadRegistry)?;
+    blocking(move || registry::read(&k))
+        .await?
+        .map(Json)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))
+}
+
+async fn registry_export(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+    Query(k): Query<RegKeyPath>,
+) -> ApiResult<Json<String>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::ReadRegistry)?;
+    tracing::info!(technician = %tech.0, hive = ?k.hive, path = %k.path, "registry export");
+    blocking(move || registry::export(&k))
+        .await?
+        .map(Json)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))
+}
+
+/// Runs a registry change and logs who changed what (value data is not logged: it may be secret).
+async fn registry_change(
+    cfg: &DirectConfig,
+    tech: &Technician,
+    what: String,
+    f: impl FnOnce() -> Result<(), String> + Send + 'static,
+) -> ApiResult<StatusCode> {
+    authorize(cfg, tech, Op::WriteRegistry)?;
+    let result = blocking(f).await?;
+    tracing::info!(technician = %tech.0, what, ok = result.is_ok(), detail = ?result.as_ref().err(), "registry change");
+    result
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))
+}
+
+async fn registry_set_value(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+    Json(req): Json<RegSetValueRequest>,
+) -> ApiResult<StatusCode> {
+    check_protocol(&headers)?;
+    let what = format!("set {:?}\\{} [{:?}]", req.key.hive, req.key.path, req.name);
+    registry_change(&cfg, &tech, what, move || registry::set_value(&req)).await
+}
+
+async fn registry_delete_value(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+    Json(req): Json<RegDeleteValueRequest>,
+) -> ApiResult<StatusCode> {
+    check_protocol(&headers)?;
+    let what = format!(
+        "delete value {:?}\\{} [{:?}]",
+        req.key.hive, req.key.path, req.name
+    );
+    registry_change(&cfg, &tech, what, move || registry::delete_value(&req)).await
+}
+
+async fn registry_delete_key(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+    Json(req): Json<RegDeleteKeyRequest>,
+) -> ApiResult<StatusCode> {
+    check_protocol(&headers)?;
+    let what = format!(
+        "delete key {:?}\\{} recursive={}",
+        req.key.hive, req.key.path, req.recursive
+    );
+    registry_change(&cfg, &tech, what, move || registry::delete_key(&req)).await
+}
+
 /// Serves direct management until `stop` fires.
 pub async fn serve(
     cfg: DirectConfig,
@@ -420,6 +509,11 @@ pub async fn serve(
         .route("/v1/eventlog/events", get(event_records))
         .route("/v1/inventory/hardware", get(hardware_inventory))
         .route("/v1/inventory/software", get(software_inventory))
+        .route("/v1/registry/key", get(registry_key))
+        .route("/v1/registry/export", get(registry_export))
+        .route("/v1/registry/value", post(registry_set_value))
+        .route("/v1/registry/value/delete", post(registry_delete_value))
+        .route("/v1/registry/key/delete", post(registry_delete_key))
         .route("/v1/services/{name}/control", post(control_service))
         .route(
             "/v1/services/{name}/start-type",
