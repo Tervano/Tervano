@@ -1,6 +1,7 @@
 mod collect;
 mod direct;
 mod eventlog;
+mod inventory;
 mod processes;
 mod secure;
 #[cfg(windows)]
@@ -382,6 +383,7 @@ const USAGE: &str = "\
 usage: TervanoAgent <command>
   run [config]                 run in the foreground (default config: agent.toml)
   collect                      print the state this agent would report, as JSON
+  inventory                    print this computer's hardware inventory, as JSON
   direct-fingerprint [config]  print the SHA-256 fingerprint consoles pin for direct management
   service install [config]     install the Windows service (admin; default config: %ProgramData%\\Tervano\\Agent\\agent.toml)
   service uninstall            remove the Windows service (admin)";
@@ -420,6 +422,10 @@ fn main() -> anyhow::Result<()> {
                 })?
             };
             println!("{}", direct::fingerprint(&der));
+            Ok(())
+        }
+        ["inventory"] => {
+            println!("{}", serde_json::to_string_pretty(&inventory::hardware())?);
             Ok(())
         }
         ["collect"] => {

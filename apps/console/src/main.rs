@@ -5,7 +5,8 @@ mod api;
 mod direct;
 
 use iced::widget::{
-    Space, button, column, container, pick_list, row, rule, scrollable, text, text_input,
+    Space, button, column, container, pick_list, progress_bar, row, rule, scrollable, text,
+    text_input,
 };
 use iced::{Alignment, Color, Element, Length, Subscription, Task, Theme};
 use serde::{Deserialize, Serialize};
@@ -134,6 +135,7 @@ enum Message {
     EvtChannelsLoaded(Result<Vec<String>, String>),
     EvtToggle(u64),
     EvtExport,
+    HwLoaded(String, Result<HardwareInventory, String>),
 }
 
 /// Level filter for the Events tab: `None` = any.
@@ -238,6 +240,7 @@ enum DirectTab {
     Processes,
     Services,
     Events,
+    Hardware,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -301,6 +304,7 @@ struct Console {
     evt_channels: Vec<String>,
     evt_expanded: Option<u64>,
     evt_notice: Option<Result<String, String>>,
+    hw: Option<(String, Result<HardwareInventory, String>)>,
 }
 
 impl Console {
@@ -352,6 +356,7 @@ impl Console {
             evt_channels: Vec::new(),
             evt_expanded: None,
             evt_notice: None,
+            hw: None,
         };
         let task = if configured { c.search() } else { Task::none() };
         (c, task)
@@ -435,6 +440,9 @@ impl Console {
                 });
                 Task::batch([channels, events])
             }
+            DirectTab::Hardware => Task::perform(direct::hardware(t), move |r| {
+                Message::HwLoaded(addr.clone(), r)
+            }),
         };
         Task::batch([device, tab])
     }
@@ -560,6 +568,7 @@ impl Console {
                     self.evt_channels.clear();
                     self.evt_expanded = None;
                     self.evt_notice = None;
+                    self.hw = None;
                 }
                 self.direct_selected = Some(address.clone());
                 return self.load_direct(&address);
@@ -657,6 +666,11 @@ impl Console {
             Message::EvtExport => {
                 if let (Some((addr, Ok(list))), Some(dir)) = (&self.evts, downloads_dir()) {
                     self.evt_notice = Some(export_events_csv(&dir, addr, &self.evt_channel, list));
+                }
+            }
+            Message::HwLoaded(address, r) => {
+                if self.direct_selected.as_deref() == Some(address.as_str()) {
+                    self.hw = Some((address, r));
                 }
             }
             Message::KillDone(r) => {
@@ -1035,13 +1049,15 @@ impl Console {
                             DirectTab::Processes => self.procs_view(),
                             DirectTab::Services => self.svcs_view(),
                             DirectTab::Events => self.evts_view(),
+                            DirectTab::Hardware => self.hw_view(),
                         };
                         column![
                             row![
                                 tab("Summary", DirectTab::Summary),
                                 tab("Processes", DirectTab::Processes),
                                 tab("Services", DirectTab::Services),
-                                tab("Events", DirectTab::Events)
+                                tab("Events", DirectTab::Events),
+                                tab("Hardware", DirectTab::Hardware)
                             ]
                             .spacing(6),
                             body
@@ -1068,6 +1084,112 @@ impl Console {
             }
         };
         column![top, content].spacing(12).into()
+    }
+
+    fn hw_view(&self) -> Element<'_, Message> {
+        let hw = match &self.hw {
+            None => return centered("Reading hardware…"),
+            Some((_, Err(e))) => return error_box(e),
+            Some((_, Ok(hw))) => hw,
+        };
+        let opt = |v: &Option<String>| v.clone().unwrap_or_else(|| "unknown".into());
+        let kv = |k: &'static str, v: String| {
+            row![text(k).width(140).style(text::secondary), text(v)].spacing(8)
+        };
+        let section = |t: &'static str| text(t).size(13).style(text::primary);
+        let gb = |b: u64| format!("{:.1} GB", b as f64 / 1_073_741_824.0);
+        let mut disks = column![section("Storage")].spacing(6);
+        for d in &hw.disks {
+            let used = d.total_bytes.saturating_sub(d.free_bytes);
+            disks = disks.push(
+                column![
+                    text(format!(
+                        "{} {}  ·  {} free of {}  ·  {}{}",
+                        d.mount_point,
+                        d.label,
+                        gb(d.free_bytes),
+                        gb(d.total_bytes),
+                        d.kind.to_uppercase(),
+                        if d.removable { " · removable" } else { "" }
+                    ))
+                    .size(13),
+                    progress_bar(0.0..=d.total_bytes.max(1) as f32, used as f32).girth(6),
+                ]
+                .spacing(3),
+            );
+        }
+        let battery = match &hw.battery {
+            None => "none".to_string(),
+            Some(b) => format!(
+                "{}{}",
+                b.charge_percent
+                    .map_or("charge unknown".into(), |c| format!("{c}%")),
+                match b.on_ac_power {
+                    Some(true) => " · on AC power",
+                    Some(false) => " · on battery",
+                    None => "",
+                }
+            ),
+        };
+        scrollable(
+            column![
+                section("System"),
+                kv("Manufacturer", opt(&hw.manufacturer)),
+                kv("Model", opt(&hw.model)),
+                kv("Serial number", opt(&hw.serial_number)),
+                kv(
+                    "BIOS",
+                    format!(
+                        "{} {} ({})",
+                        opt(&hw.bios_vendor),
+                        opt(&hw.bios_version),
+                        opt(&hw.bios_date)
+                    )
+                ),
+                kv("Booted", ago(hw.boot_time)),
+                rule::horizontal(1),
+                section("Processor and memory"),
+                kv("CPU", hw.cpu_model.clone()),
+                kv(
+                    "Cores",
+                    format!(
+                        "{} physical · {} logical",
+                        hw.cpu_physical_cores.map_or("?".into(), |c| c.to_string()),
+                        hw.cpu_logical_cores
+                    )
+                ),
+                kv("CPU load", format!("{:.0}%", hw.cpu_usage_percent)),
+                kv(
+                    "Memory",
+                    format!(
+                        "{} used of {}",
+                        gb(hw.memory_used_bytes),
+                        gb(hw.memory_total_bytes)
+                    )
+                ),
+                rule::horizontal(1),
+                section("Security"),
+                kv(
+                    "Secure Boot",
+                    match hw.secure_boot {
+                        Some(true) => "enabled".into(),
+                        Some(false) => "disabled".into(),
+                        None => "unknown".into(),
+                    }
+                ),
+                kv(
+                    "TPM",
+                    hw.tpm_version
+                        .clone()
+                        .unwrap_or_else(|| "not detected".into())
+                ),
+                kv("Battery", battery),
+                rule::horizontal(1),
+                disks,
+            ]
+            .spacing(8),
+        )
+        .into()
     }
 
     fn event_query(&self) -> EventQuery {

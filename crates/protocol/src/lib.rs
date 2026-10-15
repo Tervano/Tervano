@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.5";
+pub const PROTOCOL_VERSION: &str = "1.6";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -262,6 +262,50 @@ pub struct EventQuery {
     pub within_minutes: Option<u32>,
     /// At most this many records (default 100, max 500).
     pub limit: Option<u32>,
+}
+
+/// Hardware and firmware facts reported by an agent (`GET /v1/inventory/hardware`).
+/// `None` means "could not be determined", never "absent", unless documented otherwise.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HardwareInventory {
+    pub manufacturer: Option<String>,
+    pub model: Option<String>,
+    pub serial_number: Option<String>,
+    pub bios_vendor: Option<String>,
+    pub bios_version: Option<String>,
+    pub bios_date: Option<String>,
+    pub cpu_model: String,
+    pub cpu_physical_cores: Option<u32>,
+    pub cpu_logical_cores: u32,
+    pub cpu_usage_percent: f32,
+    pub memory_total_bytes: u64,
+    pub memory_used_bytes: u64,
+    pub disks: Vec<DiskInfo>,
+    pub boot_time: Millis,
+    pub secure_boot: Option<bool>,
+    /// "2.0" / "1.2"; `None` when no TPM is visible to Windows.
+    pub tpm_version: Option<String>,
+    /// `None` on machines without a battery.
+    pub battery: Option<BatteryInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiskInfo {
+    /// e.g. `C:\`.
+    pub mount_point: String,
+    pub label: String,
+    pub file_system: String,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub removable: bool,
+    /// "ssd", "hdd" or "unknown".
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatteryInfo {
+    pub charge_percent: Option<u8>,
+    pub on_ac_power: Option<bool>,
 }
 
 /// SSE event names on `GET /api/v1/stream`.

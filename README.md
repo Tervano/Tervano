@@ -52,7 +52,7 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Console | Serverless mode (Direct page) | Implemented | Windows | Add agents by address, confirm their certificate fingerprint on first contact, then view live device info over mutual TLS. Pin changes are refused with a warning |
 | Directory | Active Directory browsing | Planned | Windows | T-600+ |
 | Remote | Screen viewing / remote input / user notification | Planned | Windows | T-500+ |
-| Inventory | Hardware information | Planned | Windows | T-703 |
+| Inventory | Hardware information | Partial | Windows | Direct channel and `TervanoAgent inventory`: make, model, serial, BIOS, CPU, memory, disks, Secure Boot, TPM, battery charge. Not yet: BitLocker, battery health, server-side snapshots |
 | Systems | Process management | Implemented | Windows | Direct channel: list with owner, CPU, memory and architecture; terminate after confirmation. Critical Windows processes and reused PIDs are refused; only technicians listed as `operators` may terminate |
 | Systems | Service management | Partial | Windows | Direct channel: list services with state, start type, account and dependencies; start/stop/restart/pause/resume and change start type (operators only, with confirmation). Successful changes not yet verified on an elevated agent |
 | Systems | Event log browsing | Implemented | Windows | Direct channel: any channel, filtered on the endpoint by level, provider, event ID and time window; newest first; CSV export |
