@@ -121,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
             let addr: std::net::SocketAddr = cfg.listen.parse()?;
             let state = AppState::new(db, cfg.offline_after_secs as i64 * 1000);
             spawn_offline_sweeper(state.clone());
-            let router = app(state).into_make_service();
+            let router = app(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
             let handle = axum_server::Handle::new();
             let h = handle.clone();
             tokio::spawn(async move {
@@ -161,6 +161,7 @@ async fn main() -> anyhow::Result<()> {
                 "",
                 true,
                 &format!("uses={uses} hours={hours}"),
+                None,
             )
             .await;
             println!("{token}");
@@ -169,7 +170,16 @@ async fn main() -> anyhow::Result<()> {
             cmd: TechCmd::Create { name },
         } => {
             let token = create_technician(&db, &name).await?;
-            audit(&db, &cli_actor(), "technician.create", &name, true, "").await;
+            audit(
+                &db,
+                &cli_actor(),
+                "technician.create",
+                &name,
+                true,
+                "",
+                None,
+            )
+            .await;
             println!("{token}");
         }
         Cmd::Cert { .. } => unreachable!("handled above"),

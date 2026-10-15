@@ -59,7 +59,7 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-116 | [ ] | | Rate limiting / body size limits / reconnect-storm backpressure | §14 |
 | T-117 | [ ] | | Run as Windows service + systemd unit + Dockerfile | §15 |
 | T-118 | [ ] | | Metrics endpoint (OpenTelemetry/Prometheus) incl. event volume | §14 |
-| T-119 | [~] | codex | Record client IP in audit rows (`into_make_service_with_connect_info`) | |
+| T-119 | [x] | codex | Record client IP in audit rows (`into_make_service_with_connect_info`) | Verified on Windows 2026-10-15: live loopback server audit API showed `127.0.0.1` for failed technician auth (401), rejected enrollment (403), successful enrollment (200); CLI event has null IP. `cargo build/test --workspace`, clippy `-D warnings`, fmt clean. Socket peer only; proxy deployments record proxy IP. |
 
 ### Agent
 | ID | Status | Owner | Task | Notes / acceptance |

@@ -1,8 +1,8 @@
 //! Tervano Server library: HTTP API + persistence. `main.rs` is the CLI around it.
 
 use axum::{
-    Json, Router,
-    extract::{FromRequestParts, Path, Query, Request, State},
+    Extension, Json, Router,
+    extract::{ConnectInfo, FromRequestParts, Path, Query, Request, State},
     http::{StatusCode, header, request::Parts},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -11,7 +11,11 @@ use axum::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool, sqlite::SqliteConnectOptions};
-use std::{str::FromStr, time::Duration};
+use std::{
+    net::{IpAddr, SocketAddr},
+    str::FromStr,
+    time::Duration,
+};
 use tervano_protocol::*;
 use uuid::Uuid;
 
@@ -279,6 +283,10 @@ impl FromRequestParts<AppState> for TechAuth {
         match name {
             Some(name) => Ok(TechAuth { name }),
             None => {
+                let client_ip = parts
+                    .extensions
+                    .get::<ConnectInfo<SocketAddr>>()
+                    .map(|c| c.0.ip());
                 audit(
                     &s.db,
                     "anonymous",
@@ -286,6 +294,7 @@ impl FromRequestParts<AppState> for TechAuth {
                     "",
                     false,
                     "unknown token",
+                    client_ip,
                 )
                 .await;
                 Err(unauthorized())
@@ -303,11 +312,12 @@ pub async fn audit(
     target: &str,
     ok: bool,
     detail: &str,
+    client_ip: Option<IpAddr>,
 ) {
     // Detail can contain client-supplied text; cap it so it can't bloat the log.
     let detail: String = detail.chars().take(512).collect();
     let r = sqlx::query(
-        "INSERT INTO audit_log (at, actor, action, target, ok, detail) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO audit_log (at, actor, action, target, ok, detail, client_ip) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(now_millis())
     .bind(actor)
@@ -315,6 +325,7 @@ pub async fn audit(
     .bind(target)
     .bind(ok)
     .bind(detail)
+    .bind(client_ip.map(|ip| ip.to_string()))
     .execute(db)
     .await;
     if let Err(e) = r {
@@ -324,8 +335,10 @@ pub async fn audit(
 
 async fn enroll(
     State(s): State<AppState>,
+    client: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(req): Json<EnrollRequest>,
 ) -> Result<Json<EnrollResponse>, AppError> {
+    let client_ip = client.map(|c| c.0.0.ip());
     let now = now_millis();
     let mut tx = s.db.begin().await?;
     // Atomically consume one use of a valid token.
@@ -347,6 +360,7 @@ async fn enroll(
             &host,
             false,
             "invalid or expired token",
+            client_ip,
         )
         .await;
         return Err(AppError(err(
@@ -380,6 +394,7 @@ async fn enroll(
         &req.state.hostname,
         true,
         "",
+        client_ip,
     )
     .await;
     Ok(Json(EnrollResponse {
@@ -606,7 +621,7 @@ async fn list_audit(
     Query(p): Query<AuditParams>,
 ) -> Result<Json<Vec<AuditRecord>>, AppError> {
     let rows = sqlx::query(
-        "SELECT id, at, actor, action, target, ok, detail FROM audit_log
+        "SELECT id, at, actor, action, target, ok, detail, client_ip FROM audit_log
          WHERE id < ? ORDER BY id DESC LIMIT ?",
     )
     .bind(p.before.unwrap_or(i64::MAX))
@@ -623,6 +638,7 @@ async fn list_audit(
                 target: r.get("target"),
                 ok: r.get("ok"),
                 detail: r.get("detail"),
+                client_ip: r.get("client_ip"),
             })
             .collect(),
     ))

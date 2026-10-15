@@ -35,7 +35,7 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Agent | Background service | Partial | Windows | SCM install/run implemented ([service.rs](apps/agent/src/service.rs)); foreground mode verified on Win 11 25H2; service mode not yet verified end-to-end |
 | Agent | Secure enrollment | Partial | Windows | One-time/N-use expiring tokens over TLS; device secret DPAPI-protected on the agent. Mutual TLS device identity is T-808 |
 | Server | TLS | Implemented | Win/Linux | rustls; plaintext only on loopback. `tervano-server cert init` creates a private CA + server cert |
-| Server | Audit log | Partial | Win/Linux | Append-only (DB triggers); enrollments, auth failures, token/technician creation. `GET /api/v1/audit` |
+| Server | Audit log | Partial | Win/Linux | Append-only (DB triggers); enrollments, auth failures, token/technician creation. `GET /api/v1/audit` includes socket peer IP for HTTP events; behind a proxy this is the proxy IP |
 | Agent | Report hostname, OS, IPs, signed-in users | Implemented | Windows | Verified on Windows 11 Home 25H2 (build 26200), workgroup machine. Not yet tested domain-joined |
 | Agent | Change detection | Partial | Windows | Poll-and-diff every `poll_secs`; event-driven notifications are T-209/T-210 |
 | Server | Device index + search | Implemented | Win/Linux | Prefix search by hostname, username, `DOMAIN\user`, IP. Tests: [api.rs](apps/server/tests/api.rs). Not yet benchmarked (T-112) |
