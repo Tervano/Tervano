@@ -169,7 +169,7 @@ Each module: agent operation + authorization + audit + console tab. Build one fu
 | ID | Status | Owner | Task | Notes |
 |---|---|---|---|---|
 | T-700 | [x] | claude | Processes over the direct channel: list (pid, parent, name, exe, owner `DOMAIN\user`, CPU %, memory, start time, arch via IsWow64Process2) and terminate; Console Direct → Processes tab (filter, sort, two-step confirm) | Verified 2026-10-15 on Win 11 25H2 with the agent running as a normal user: 465 processes listed (owner resolved for 302, arch for 304; the rest belong to accounts a non-admin can't open, expect more as SYSTEM, unverified); an operator terminated a `ping` (it exited); refused: non-operator (403), PID/name mismatch, critical process (csrss), the agent itself. Console client exercised against the live agent; Processes tab not clicked by eye (T-314). Server-routed access needs relay (T-516) |
-| T-701 | [ ] | | Services: list, start/stop/pause/restart, startup type, deps, account | |
+| T-701 | [~] | claude | Services: list, start/stop/pause/restart, startup type, deps, account | |
 | T-702 | [ ] | | Event logs: channels, filter (time/provider/level/id), details, export | no full-log download |
 | T-703 | [ ] | | Hardware inventory: CPU, RAM, disks, NICs, BIOS, model, serial, TPM, Secure Boot, BitLocker, battery | |
 | T-704 | [ ] | | Software inventory: installed apps, versions, publisher, uninstall info, pending reboot | |
