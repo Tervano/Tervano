@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.4";
+pub const PROTOCOL_VERSION: &str = "1.5";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -234,6 +234,34 @@ pub struct ServiceControlRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartTypeRequest {
     pub start_type: StartType,
+}
+
+/// One Windows event log record (`GET /v1/eventlog/events` on the direct channel).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EventRecord {
+    pub record_id: u64,
+    pub time: Millis,
+    /// 1 critical, 2 error, 3 warning, 4 information, 5 verbose (0 = "log always", shown as information).
+    pub level: u8,
+    pub provider: String,
+    pub event_id: u32,
+    /// Rendered message; `None` when the provider's message resources are unavailable.
+    pub message: Option<String>,
+}
+
+/// Query string of `GET /v1/eventlog/events`. Results are newest first.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EventQuery {
+    /// e.g. "System", "Application", "Microsoft-Windows-PowerShell/Operational".
+    pub channel: String,
+    /// Only this level or more severe (1–5).
+    pub max_level: Option<u8>,
+    pub provider: Option<String>,
+    pub event_id: Option<u32>,
+    /// Only events newer than this many minutes.
+    pub within_minutes: Option<u32>,
+    /// At most this many records (default 100, max 500).
+    pub limit: Option<u32>,
 }
 
 /// SSE event names on `GET /api/v1/stream`.

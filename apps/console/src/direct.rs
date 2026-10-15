@@ -274,3 +274,17 @@ pub async fn set_start_type(
     .await?;
     json(res).await
 }
+
+pub async fn event_channels(t: Target) -> Result<Vec<String>, String> {
+    json(send(&t, |c, base| c.get(format!("{base}/v1/eventlog/channels"))).await?).await
+}
+
+pub async fn events(t: Target, q: EventQuery) -> Result<Vec<EventRecord>, String> {
+    json(
+        send(&t, |c, base| {
+            c.get(format!("{base}/v1/eventlog/events")).query(&q)
+        })
+        .await?,
+    )
+    .await
+}

@@ -5,11 +5,11 @@
 //! certificate, which consoles pin by SHA-256 fingerprint (`TervanoAgent direct-fingerprint`).
 //! Authorization is checked here, per operation, never just in the Console (PLAN §12.9).
 
-use crate::{collect, processes::Processes, secure, services};
+use crate::{collect, eventlog, processes::Processes, secure, services};
 use anyhow::Context;
 use axum::{
     Extension, Json, Router,
-    extract::Path as UrlPath,
+    extract::{Path as UrlPath, Query},
     http::{HeaderMap, StatusCode},
     middleware::AddExtension,
     routing::{get, post},
@@ -63,6 +63,7 @@ enum Op {
     ListServices,
     ControlService,
     SetServiceStartType,
+    ReadEventLog,
 }
 
 impl Op {
@@ -74,6 +75,7 @@ impl Op {
             Op::ListServices => "service.list",
             Op::ControlService => "service.control",
             Op::SetServiceStartType => "service.start_type",
+            Op::ReadEventLog => "eventlog.read",
         }
     }
 
@@ -349,6 +351,35 @@ async fn set_service_start_type(
     )
 }
 
+async fn event_channels(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<String>>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::ReadEventLog)?;
+    blocking(eventlog::channels)
+        .await?
+        .map(Json)
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+async fn event_records(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+    Query(q): Query<EventQuery>,
+) -> ApiResult<Json<Vec<EventRecord>>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::ReadEventLog)?;
+    tracing::info!(technician = %tech.0, channel = %q.channel, "eventlog query");
+    // Bad filters and unreadable channels (e.g. Security without admin) are the caller's to fix.
+    blocking(move || eventlog::query(&q))
+        .await?
+        .map(Json)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))
+}
+
 /// Serves direct management until `stop` fires.
 pub async fn serve(
     cfg: DirectConfig,
@@ -363,6 +394,8 @@ pub async fn serve(
         .route("/v1/processes", get(list_processes))
         .route("/v1/processes/{pid}/kill", post(kill_process))
         .route("/v1/services", get(list_services))
+        .route("/v1/eventlog/channels", get(event_channels))
+        .route("/v1/eventlog/events", get(event_records))
         .route("/v1/services/{name}/control", post(control_service))
         .route(
             "/v1/services/{name}/start-type",

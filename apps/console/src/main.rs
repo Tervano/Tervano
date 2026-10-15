@@ -124,6 +124,74 @@ enum Message {
     SvcConfirm,
     SvcCancel,
     SvcDone(Result<String, String>),
+    EvtChannel(String),
+    EvtLevel(LevelChoice),
+    EvtWithin(WithinChoice),
+    EvtProvider(String),
+    EvtId(String),
+    EvtRun,
+    EvtsLoaded(String, Result<Vec<EventRecord>, String>),
+    EvtChannelsLoaded(Result<Vec<String>, String>),
+    EvtToggle(u64),
+    EvtExport,
+}
+
+/// Level filter for the Events tab: `None` = any.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LevelChoice(Option<u8>);
+
+impl std::fmt::Display for LevelChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self.0 {
+            None => "Any level",
+            Some(1) => "Critical",
+            Some(2) => "Error and worse",
+            Some(3) => "Warning and worse",
+            _ => "Information and worse",
+        })
+    }
+}
+
+const LEVEL_CHOICES: [LevelChoice; 5] = [
+    LevelChoice(None),
+    LevelChoice(Some(1)),
+    LevelChoice(Some(2)),
+    LevelChoice(Some(3)),
+    LevelChoice(Some(4)),
+];
+
+/// Time window for the Events tab, in minutes: `None` = all time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WithinChoice(Option<u32>);
+
+impl std::fmt::Display for WithinChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self.0 {
+            None => "Any time",
+            Some(60) => "Last hour",
+            Some(1440) => "Last 24 hours",
+            Some(10080) => "Last 7 days",
+            _ => "Last 30 days",
+        })
+    }
+}
+
+const WITHIN_CHOICES: [WithinChoice; 5] = [
+    WithinChoice(Some(60)),
+    WithinChoice(Some(1440)),
+    WithinChoice(Some(10080)),
+    WithinChoice(Some(43200)),
+    WithinChoice(None),
+];
+
+fn level_name(l: u8) -> &'static str {
+    match l {
+        1 => "Critical",
+        2 => "Error",
+        3 => "Warning",
+        5 => "Verbose",
+        _ => "Information",
+    }
 }
 
 /// A service change awaiting the technician's confirmation.
@@ -169,6 +237,7 @@ enum DirectTab {
     Summary,
     Processes,
     Services,
+    Events,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -222,6 +291,16 @@ struct Console {
     svc_notice: Option<Result<String, String>>,
     /// A service change is running on the agent (restart can take tens of seconds).
     svc_busy: bool,
+    evt_channel: String,
+    evt_level: LevelChoice,
+    evt_within: WithinChoice,
+    evt_provider: String,
+    evt_id: String,
+    evts: Option<(String, Result<Vec<EventRecord>, String>)>,
+    /// All channel names of the selected endpoint, for suggestions.
+    evt_channels: Vec<String>,
+    evt_expanded: Option<u64>,
+    evt_notice: Option<Result<String, String>>,
 }
 
 impl Console {
@@ -264,6 +343,15 @@ impl Console {
             svc_confirm: None,
             svc_notice: None,
             svc_busy: false,
+            evt_channel: "System".into(),
+            evt_level: LevelChoice(Some(3)),
+            evt_within: WithinChoice(Some(1440)),
+            evt_provider: String::new(),
+            evt_id: String::new(),
+            evts: None,
+            evt_channels: Vec::new(),
+            evt_expanded: None,
+            evt_notice: None,
         };
         let task = if configured { c.search() } else { Task::none() };
         (c, task)
@@ -332,6 +420,21 @@ impl Console {
             DirectTab::Services => Task::perform(direct::services(t), move |r| {
                 Message::SvcsLoaded(addr.clone(), r)
             }),
+            DirectTab::Events => {
+                let q = self.event_query();
+                let channels = if self.evt_channels.is_empty() {
+                    Task::perform(
+                        direct::event_channels(t.clone()),
+                        Message::EvtChannelsLoaded,
+                    )
+                } else {
+                    Task::none()
+                };
+                let events = Task::perform(direct::events(t, q), move |r| {
+                    Message::EvtsLoaded(addr.clone(), r)
+                });
+                Task::batch([channels, events])
+            }
         };
         Task::batch([device, tab])
     }
@@ -453,6 +556,10 @@ impl Console {
                     self.svcs = None;
                     self.svc_confirm = None;
                     self.svc_notice = None;
+                    self.evts = None;
+                    self.evt_channels.clear();
+                    self.evt_expanded = None;
+                    self.evt_notice = None;
                 }
                 self.direct_selected = Some(address.clone());
                 return self.load_direct(&address);
@@ -522,6 +629,34 @@ impl Console {
                 self.svc_notice = Some(r);
                 if let Some(addr) = self.direct_selected.clone() {
                     return self.load_direct(&addr);
+                }
+            }
+            Message::EvtChannel(c) => self.evt_channel = c,
+            Message::EvtLevel(l) => self.evt_level = l,
+            Message::EvtWithin(w) => self.evt_within = w,
+            Message::EvtProvider(p) => self.evt_provider = p,
+            Message::EvtId(i) => self.evt_id = i.chars().filter(char::is_ascii_digit).collect(),
+            Message::EvtRun => {
+                self.evt_notice = None;
+                if let Some(addr) = self.direct_selected.clone() {
+                    return self.load_direct(&addr);
+                }
+            }
+            Message::EvtsLoaded(address, r) => {
+                if self.direct_selected.as_deref() == Some(address.as_str()) {
+                    self.evts = Some((address, r));
+                }
+            }
+            Message::EvtChannelsLoaded(r) => {
+                // Suggestions are a convenience; a failure just means none are offered.
+                self.evt_channels = r.unwrap_or_default();
+            }
+            Message::EvtToggle(id) => {
+                self.evt_expanded = (self.evt_expanded != Some(id)).then_some(id);
+            }
+            Message::EvtExport => {
+                if let (Some((addr, Ok(list))), Some(dir)) = (&self.evts, downloads_dir()) {
+                    self.evt_notice = Some(export_events_csv(&dir, addr, &self.evt_channel, list));
                 }
             }
             Message::KillDone(r) => {
@@ -899,12 +1034,14 @@ impl Console {
                             ),
                             DirectTab::Processes => self.procs_view(),
                             DirectTab::Services => self.svcs_view(),
+                            DirectTab::Events => self.evts_view(),
                         };
                         column![
                             row![
                                 tab("Summary", DirectTab::Summary),
                                 tab("Processes", DirectTab::Processes),
-                                tab("Services", DirectTab::Services)
+                                tab("Services", DirectTab::Services),
+                                tab("Events", DirectTab::Events)
                             ]
                             .spacing(6),
                             body
@@ -931,6 +1068,163 @@ impl Console {
             }
         };
         column![top, content].spacing(12).into()
+    }
+
+    fn event_query(&self) -> EventQuery {
+        EventQuery {
+            channel: self.evt_channel.trim().to_owned(),
+            max_level: self.evt_level.0,
+            provider: Some(self.evt_provider.trim().to_owned()).filter(|p| !p.is_empty()),
+            event_id: self.evt_id.parse().ok(),
+            within_minutes: self.evt_within.0,
+            limit: Some(200),
+        }
+    }
+
+    fn evts_view(&self) -> Element<'_, Message> {
+        let quick = ["System", "Application", "Security", "Setup"]
+            .into_iter()
+            .fold(row![].spacing(4), |r, c| {
+                r.push(
+                    button(text(c).size(12))
+                        .style(if self.evt_channel == c {
+                            button::primary
+                        } else {
+                            button::subtle
+                        })
+                        .padding([2, 8])
+                        .on_press(Message::EvtChannel(c.into())),
+                )
+            });
+        let controls = column![
+            row![
+                text_input(
+                    "Channel, e.g. Microsoft-Windows-PowerShell/Operational",
+                    &self.evt_channel
+                )
+                .on_input(Message::EvtChannel)
+                .on_submit(Message::EvtRun)
+                .padding(6)
+                .width(Length::FillPortion(3)),
+                pick_list(LEVEL_CHOICES, Some(self.evt_level), Message::EvtLevel)
+                    .text_size(13)
+                    .width(Length::FillPortion(2)),
+                pick_list(WITHIN_CHOICES, Some(self.evt_within), Message::EvtWithin)
+                    .text_size(13)
+                    .width(Length::FillPortion(2)),
+            ]
+            .spacing(6),
+            row![
+                text_input("Provider (optional)", &self.evt_provider)
+                    .on_input(Message::EvtProvider)
+                    .on_submit(Message::EvtRun)
+                    .padding(6)
+                    .width(Length::FillPortion(3)),
+                text_input("Event ID", &self.evt_id)
+                    .on_input(Message::EvtId)
+                    .on_submit(Message::EvtRun)
+                    .padding(6)
+                    .width(Length::FillPortion(1)),
+                button(text("Query"))
+                    .style(button::primary)
+                    .on_press(Message::EvtRun),
+                button(text("Export CSV"))
+                    .style(button::secondary)
+                    .on_press_maybe(
+                        matches!(self.evts, Some((_, Ok(_)))).then_some(Message::EvtExport)
+                    ),
+            ]
+            .spacing(6),
+            quick,
+        ]
+        .spacing(6);
+
+        // Channel suggestions while typing something that isn't an exact channel name.
+        let typed = self.evt_channel.trim().to_lowercase();
+        let suggestions: Vec<&String> =
+            if typed.len() >= 3 && !self.evt_channels.iter().any(|c| c.to_lowercase() == typed) {
+                self.evt_channels
+                    .iter()
+                    .filter(|c| c.to_lowercase().contains(&typed))
+                    .take(6)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        let mut col = column![controls].spacing(6);
+        if !suggestions.is_empty() {
+            col = col.push(suggestions.into_iter().fold(column![].spacing(2), |c, s| {
+                c.push(
+                    button(text(s).size(12))
+                        .style(button::text)
+                        .padding([1, 6])
+                        .on_press(Message::EvtChannel(s.clone())),
+                )
+            }));
+        }
+        if let Some(n) = &self.evt_notice {
+            col = col.push(match n {
+                Ok(m) => text(m.clone()).size(13).style(text::success),
+                Err(e) => text(e.clone()).size(13).style(text::danger),
+            });
+        }
+        let list = match &self.evts {
+            None => return col.push(centered("Loading events…")).into(),
+            Some((_, Err(e))) => return col.push(error_box(e)).into(),
+            Some((_, Ok(list))) => list,
+        };
+        if list.is_empty() {
+            return col.push(centered("No events match these filters.")).into();
+        }
+        let rows = list.iter().map(|e| {
+            let msg = e
+                .message
+                .as_deref()
+                .unwrap_or("(no message text available)");
+            let expanded = self.evt_expanded == Some(e.record_id);
+            let summary: String = if expanded {
+                msg.to_owned()
+            } else {
+                msg.lines().next().unwrap_or("").chars().take(140).collect()
+            };
+            let level_style = match e.level {
+                1 | 2 => text::danger,
+                3 => text::warning,
+                _ => text::secondary,
+            };
+            button(
+                column![
+                    row![
+                        text(ago(e.time)).size(12).width(80),
+                        text(level_name(e.level))
+                            .size(12)
+                            .style(level_style)
+                            .width(80),
+                        text(&e.provider).size(12).width(Length::Fill),
+                        text(format!("ID {}", e.event_id)).size(12),
+                    ]
+                    .spacing(6),
+                    text(summary).size(13),
+                ]
+                .spacing(2),
+            )
+            .style(if expanded {
+                button::secondary
+            } else {
+                button::text
+            })
+            .width(Length::Fill)
+            .padding([4, 6])
+            .on_press(Message::EvtToggle(e.record_id))
+            .into()
+        });
+        col.push(scrollable(column(rows).spacing(2)).height(Length::Fill))
+            .push(
+                text(format!("{} events, newest first (max 200)", list.len()))
+                    .size(12)
+                    .style(text::secondary),
+            )
+            .into()
     }
 
     fn svcs_view(&self) -> Element<'_, Message> {
@@ -1364,6 +1658,57 @@ fn state_panel<'a>(
         .spacing(8),
     )
     .into()
+}
+
+fn downloads_dir() -> Option<std::path::PathBuf> {
+    Some(std::path::PathBuf::from(std::env::var_os("USERPROFILE")?).join("Downloads"))
+}
+
+/// Writes the current event results as CSV into `dir` and says where.
+fn export_events_csv(
+    dir: &std::path::Path,
+    addr: &str,
+    channel: &str,
+    list: &[EventRecord],
+) -> Result<String, String> {
+    // Leading = + - @ would make spreadsheets evaluate the cell as a formula (CSV injection).
+    let quote = |s: &str| {
+        let s = if s.starts_with(['=', '+', '-', '@']) {
+            format!("'{s}")
+        } else {
+            s.to_owned()
+        };
+        format!("\"{}\"", s.replace('"', "\"\""))
+    };
+    let mut csv = String::from("time_utc_ms,level,provider,event_id,record_id,message\r\n");
+    for e in list {
+        csv.push_str(&format!(
+            "{},{},{},{},{},{}\r\n",
+            e.time,
+            level_name(e.level),
+            quote(&e.provider),
+            e.event_id,
+            e.record_id,
+            quote(e.message.as_deref().unwrap_or(""))
+        ));
+    }
+    let safe = |s: &str| -> String {
+        s.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect()
+    };
+    let path = dir.join(format!(
+        "tervano-events-{}-{}-{}.csv",
+        safe(addr),
+        safe(channel),
+        now_millis()
+    ));
+    std::fs::write(&path, csv).map_err(|e| format!("Export failed: {e}"))?;
+    Ok(format!(
+        "Exported {} events to {}",
+        list.len(),
+        path.display()
+    ))
 }
 
 fn status_dot<'a>(online: bool) -> Element<'a, Message> {
