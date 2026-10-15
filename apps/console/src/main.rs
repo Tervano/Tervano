@@ -108,6 +108,28 @@ enum Message {
     DirectSelect(String),
     DirectLoaded(String, Result<DeviceState, String>),
     DirectRemove(String),
+    DirectTab(DirectTab),
+    ProcsLoaded(String, Result<Vec<ProcessInfo>, String>),
+    ProcFilter(String),
+    ProcSort(ProcSort),
+    KillAsk(u32, String),
+    KillConfirm,
+    KillCancel,
+    KillDone(Result<String, String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DirectTab {
+    Summary,
+    Processes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ProcSort {
+    Cpu,
+    Memory,
+    Name,
+    Pid,
 }
 
 /// An agent awaiting the technician's trust decision.
@@ -139,6 +161,14 @@ struct Console {
     direct_selected: Option<String>,
     /// Last result per endpoint address, for status dots and the details panel.
     direct_results: std::collections::HashMap<String, Result<DeviceState, String>>,
+    direct_tab: DirectTab,
+    /// Process list of the selected endpoint, keyed by its address so stale replies are ignored.
+    procs: Option<(String, Result<Vec<ProcessInfo>, String>)>,
+    proc_filter: String,
+    proc_sort: ProcSort,
+    /// (pid, name) awaiting the technician's "Terminate" confirmation.
+    confirm_kill: Option<(u32, String)>,
+    kill_notice: Option<Result<String, String>>,
 }
 
 impl Console {
@@ -170,6 +200,12 @@ impl Console {
             pending_trust: None,
             direct_selected: None,
             direct_results: Default::default(),
+            direct_tab: DirectTab::Summary,
+            procs: None,
+            proc_filter: String::new(),
+            proc_sort: ProcSort::Cpu,
+            confirm_kill: None,
+            kill_notice: None,
         };
         let task = if configured { c.search() } else { Task::none() };
         (c, task)
@@ -207,19 +243,36 @@ impl Console {
         }
     }
 
-    fn load_direct(&self, address: &str) -> Task<Message> {
-        let Some(ep) = self
+    fn target(&self, address: &str) -> Option<direct::Target> {
+        let ep = self
             .settings
             .endpoints
             .iter()
-            .find(|e| e.address == address)
-        else {
+            .find(|e| e.address == address)?;
+        Some(direct::Target {
+            address: ep.address.clone(),
+            pin: ep.fingerprint.clone(),
+            creds: self.creds(),
+        })
+    }
+
+    /// Reloads the selected endpoint's summary, plus its processes when that tab is open.
+    fn load_direct(&self, address: &str) -> Task<Message> {
+        let Some(t) = self.target(address) else {
             return Task::none();
         };
-        let (addr, pin, creds) = (ep.address.clone(), ep.fingerprint.clone(), self.creds());
-        Task::perform(direct::device(addr.clone(), pin, creds), move |r| {
-            Message::DirectLoaded(addr.clone(), r)
-        })
+        let addr = t.address.clone();
+        let device = Task::perform(direct::device(t.clone()), {
+            let addr = addr.clone();
+            move |r| Message::DirectLoaded(addr.clone(), r)
+        });
+        if self.direct_tab != DirectTab::Processes {
+            return device;
+        }
+        let procs = Task::perform(direct::processes(t), move |r| {
+            Message::ProcsLoaded(addr.clone(), r)
+        });
+        Task::batch([device, procs])
     }
 
     fn save_settings(&mut self) {
@@ -332,8 +385,48 @@ impl Console {
             }
             Message::DirectCancel => self.pending_trust = None,
             Message::DirectSelect(address) => {
+                if self.direct_selected.as_deref() != Some(address.as_str()) {
+                    self.procs = None;
+                    self.confirm_kill = None;
+                    self.kill_notice = None;
+                }
                 self.direct_selected = Some(address.clone());
                 return self.load_direct(&address);
+            }
+            Message::DirectTab(tab) => {
+                self.direct_tab = tab;
+                if let Some(addr) = self.direct_selected.clone() {
+                    return self.load_direct(&addr);
+                }
+            }
+            Message::ProcsLoaded(address, r) => {
+                if self.direct_selected.as_deref() == Some(address.as_str()) {
+                    self.procs = Some((address, r));
+                }
+            }
+            Message::ProcFilter(f) => self.proc_filter = f,
+            Message::ProcSort(s) => self.proc_sort = s,
+            Message::KillAsk(pid, name) => {
+                self.kill_notice = None;
+                self.confirm_kill = Some((pid, name));
+            }
+            Message::KillCancel => self.confirm_kill = None,
+            Message::KillConfirm => {
+                if let (Some((pid, name)), Some(t)) = (
+                    self.confirm_kill.take(),
+                    self.direct_selected.as_deref().and_then(|a| self.target(a)),
+                ) {
+                    let label = format!("{name} ({pid})");
+                    return Task::perform(direct::kill(t, pid, name), move |r| {
+                        Message::KillDone(r.map(|()| format!("Terminated {label}.")))
+                    });
+                }
+            }
+            Message::KillDone(r) => {
+                self.kill_notice = Some(r);
+                if let Some(addr) = self.direct_selected.clone() {
+                    return self.load_direct(&addr);
+                }
             }
             Message::DirectLoaded(address, r) => {
                 self.direct_results.insert(address, r);
@@ -685,7 +778,35 @@ impl Console {
                     None => centered("Connecting…"),
                     Some(Err(e)) => error_box(e),
                     Some(Ok(s)) => {
-                        state_panel(s, true, "Reachable directly · live from the agent", vec![])
+                        let tab = |label, t: DirectTab| {
+                            button(text(label).size(13))
+                                .padding([6, 12])
+                                .style(if self.direct_tab == t {
+                                    button::primary
+                                } else {
+                                    button::secondary
+                                })
+                                .on_press(Message::DirectTab(t))
+                        };
+                        let body = match self.direct_tab {
+                            DirectTab::Summary => state_panel(
+                                s,
+                                true,
+                                "Reachable directly · live from the agent",
+                                vec![],
+                            ),
+                            DirectTab::Processes => self.procs_view(),
+                        };
+                        column![
+                            row![
+                                tab("Summary", DirectTab::Summary),
+                                tab("Processes", DirectTab::Processes)
+                            ]
+                            .spacing(6),
+                            body
+                        ]
+                        .spacing(10)
+                        .into()
                     }
                 };
                 row![
@@ -700,6 +821,131 @@ impl Console {
             }
         };
         column![top, content].spacing(12).into()
+    }
+
+    fn procs_view(&self) -> Element<'_, Message> {
+        let list = match &self.procs {
+            None => return centered("Loading processes…"),
+            Some((_, Err(e))) => return error_box(e),
+            Some((_, Ok(list))) => list,
+        };
+        let f = self.proc_filter.to_lowercase();
+        let mut shown: Vec<&ProcessInfo> = list
+            .iter()
+            .filter(|p| {
+                f.is_empty()
+                    || p.name.to_lowercase().contains(&f)
+                    || p.pid.to_string() == f
+                    || p.user
+                        .as_deref()
+                        .is_some_and(|u| u.to_lowercase().contains(&f))
+            })
+            .collect();
+        match self.proc_sort {
+            ProcSort::Cpu => shown.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent)),
+            ProcSort::Memory => shown.sort_by(|a, b| b.memory_bytes.cmp(&a.memory_bytes)),
+            ProcSort::Name => shown.sort_by_key(|p| p.name.to_lowercase()),
+            ProcSort::Pid => shown.sort_by_key(|p| p.pid),
+        }
+
+        let head = |label: &'static str, s: ProcSort, w: u16| {
+            button(
+                text(if self.proc_sort == s {
+                    format!("{label} ▾")
+                } else {
+                    label.to_string()
+                })
+                .size(12),
+            )
+            .style(button::text)
+            .padding([2, 4])
+            .width(Length::FillPortion(w))
+            .on_press(Message::ProcSort(s))
+        };
+        let header = row![
+            head("Name", ProcSort::Name, 4),
+            head("PID", ProcSort::Pid, 1),
+            text("User").size(12).width(Length::FillPortion(3)),
+            head("CPU", ProcSort::Cpu, 1),
+            head("Memory", ProcSort::Memory, 2),
+            text("Arch").size(12).width(Length::FillPortion(1)),
+            Space::new().width(70),
+        ]
+        .spacing(4);
+
+        // shortcut: renders every matching row (a few hundred); virtualize with T-307.
+        let rows = shown.iter().map(|p| {
+            row![
+                text(&p.name).size(13).width(Length::FillPortion(4)),
+                text(p.pid.to_string())
+                    .size(13)
+                    .width(Length::FillPortion(1)),
+                text(p.user.as_deref().unwrap_or("—"))
+                    .size(13)
+                    .width(Length::FillPortion(3)),
+                text(format!("{:.1}%", p.cpu_percent))
+                    .size(13)
+                    .width(Length::FillPortion(1)),
+                text(format!("{:.1} MB", p.memory_bytes as f64 / 1_048_576.0))
+                    .size(13)
+                    .width(Length::FillPortion(2)),
+                text(p.arch.as_deref().unwrap_or("—"))
+                    .size(13)
+                    .width(Length::FillPortion(1)),
+                button(text("Terminate").size(12))
+                    .style(button::subtle)
+                    .width(70)
+                    .on_press(Message::KillAsk(p.pid, p.name.clone())),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center)
+            .into()
+        });
+
+        let mut col = column![
+            text_input("Filter by name, PID or user…", &self.proc_filter)
+                .on_input(Message::ProcFilter)
+                .padding(8),
+        ]
+        .spacing(6);
+        if let Some((pid, name)) = &self.confirm_kill {
+            col = col.push(
+                container(
+                    column![
+                        text(format!(
+                            "Terminate {name} (PID {pid})? Unsaved work in it will be lost."
+                        )),
+                        row![
+                            button(text("Terminate"))
+                                .style(button::danger)
+                                .on_press(Message::KillConfirm),
+                            button(text("Cancel"))
+                                .style(button::secondary)
+                                .on_press(Message::KillCancel),
+                        ]
+                        .spacing(8),
+                    ]
+                    .spacing(8),
+                )
+                .padding(10)
+                .width(Length::Fill)
+                .style(container::bordered_box),
+            );
+        }
+        if let Some(n) = &self.kill_notice {
+            col = col.push(match n {
+                Ok(m) => text(m.clone()).size(13).style(text::success),
+                Err(e) => text(e.clone()).size(13).style(text::danger),
+            });
+        }
+        col.push(container(header).style(container::rounded_box))
+            .push(scrollable(column(rows).spacing(2)).height(Length::Fill))
+            .push(
+                text(format!("{} of {} processes", shown.len(), list.len()))
+                    .size(12)
+                    .style(text::secondary),
+            )
+            .into()
     }
 
     fn settings_view(&self) -> Element<'_, Message> {

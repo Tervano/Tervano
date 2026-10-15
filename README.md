@@ -52,7 +52,8 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Directory | Active Directory browsing | Planned | Windows | T-600+ |
 | Remote | Screen viewing / remote input / user notification | Planned | Windows | T-500+ |
 | Inventory | Hardware information | Planned | Windows | T-703 |
-| Systems | Process / service / registry / event log management | Planned | Windows | T-700+ |
+| Systems | Process management | Implemented | Windows | Direct channel: list with owner, CPU, memory and architecture; terminate after confirmation. Critical Windows processes and reused PIDs are refused; only technicians listed as `operators` may terminate |
+| Systems | Service / registry / event log management | Planned | Windows | T-701+ |
 | Automation | Bulk actions | Planned | Windows | T-800+ |
 | Classroom | Live thumbnail grid | Planned | Windows | T-900+ |
 

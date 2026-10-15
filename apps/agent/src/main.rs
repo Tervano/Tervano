@@ -1,5 +1,6 @@
 mod collect;
 mod direct;
+mod processes;
 mod secure;
 #[cfg(windows)]
 mod service;

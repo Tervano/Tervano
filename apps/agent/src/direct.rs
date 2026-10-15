@@ -5,9 +5,15 @@
 //! certificate, which consoles pin by SHA-256 fingerprint (`TervanoAgent direct-fingerprint`).
 //! Authorization is checked here, per operation, never just in the Console (PLAN §12.9).
 
-use crate::{collect, secure};
+use crate::{collect, processes::Processes, secure};
 use anyhow::Context;
-use axum::{Extension, Json, Router, http::StatusCode, middleware::AddExtension, routing::get};
+use axum::{
+    Extension, Json, Router,
+    extract::Path as UrlPath,
+    http::{HeaderMap, StatusCode},
+    middleware::AddExtension,
+    routing::{get, post},
+};
 use axum_server::{accept::Accept, tls_rustls::RustlsAcceptor};
 use futures_util::future::BoxFuture;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
@@ -25,9 +31,13 @@ pub struct DirectConfig {
     pub listen: String,
     /// PEM CA whose client certificates are accepted (the organization's Tervano CA).
     pub technician_ca: PathBuf,
-    /// If non-empty, only these technician names (certificate CNs) are authorized.
+    /// If non-empty, only these technician names (certificate CNs) may use read-only operations.
     #[serde(default)]
     pub allowed_technicians: Vec<String>,
+    /// Technicians allowed to change this machine (e.g. terminate processes). Empty = nobody:
+    /// changing operations are never granted implicitly.
+    #[serde(default)]
+    pub operators: Vec<String>,
 }
 
 impl DirectConfig {
@@ -48,13 +58,22 @@ impl DirectConfig {
 #[derive(Debug, Clone, Copy)]
 enum Op {
     ReadDeviceInfo,
+    ListProcesses,
+    KillProcess,
 }
 
 impl Op {
     fn name(self) -> &'static str {
         match self {
             Op::ReadDeviceInfo => "device.read",
+            Op::ListProcesses => "process.list",
+            Op::KillProcess => "process.kill",
         }
+    }
+
+    /// Operations that change the machine need an explicit `operators` entry.
+    fn changes_machine(self) -> bool {
+        matches!(self, Op::KillProcess)
     }
 }
 
@@ -62,15 +81,37 @@ impl Op {
 #[derive(Debug, Clone)]
 struct Technician(Arc<str>);
 
-/// Per-operation authorization. Every request is logged with its decision (local audit trail).
-// shortcut: one allowlist covers all ops; per-op roles arrive with RBAC (T-806/T-402).
-fn authorize(
-    cfg: &DirectConfig,
-    tech: &Technician,
-    op: Op,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
-    let ok = cfg.allowed_technicians.is_empty()
-        || cfg.allowed_technicians.iter().any(|t| **t == *tech.0);
+type ApiResult<T> = Result<T, (StatusCode, Json<ApiError>)>;
+
+fn api_err(status: StatusCode, error: impl Into<String>) -> (StatusCode, Json<ApiError>) {
+    (
+        status,
+        Json(ApiError {
+            error: error.into(),
+        }),
+    )
+}
+
+fn check_protocol(headers: &HeaderMap) -> ApiResult<()> {
+    match headers.get(PROTOCOL_HEADER).and_then(|v| v.to_str().ok()) {
+        Some(v) if is_compatible(v) => Ok(()),
+        other => Err(api_err(
+            StatusCode::BAD_REQUEST,
+            format!("protocol {other:?} not compatible with {PROTOCOL_VERSION}"),
+        )),
+    }
+}
+
+/// Per-operation authorization: read-only ops follow `allowed_technicians`, changing ops require
+/// `operators`. Every request is logged with its decision (local audit trail).
+// shortcut: two fixed roles; configurable per-op roles arrive with RBAC (T-806).
+fn authorize(cfg: &DirectConfig, tech: &Technician, op: Op) -> ApiResult<()> {
+    let listed = |list: &[String]| list.iter().any(|t| **t == *tech.0);
+    let ok = if op.changes_machine() {
+        listed(&cfg.operators)
+    } else {
+        cfg.allowed_technicians.is_empty() || listed(&cfg.allowed_technicians)
+    };
     tracing::info!(technician = %tech.0, op = op.name(), allowed = ok, "direct request");
     if ok {
         Ok(())
@@ -186,32 +227,50 @@ fn common_name(der: &[u8]) -> Option<String> {
     (!cn.is_empty()).then(|| cn.to_owned())
 }
 
+/// Runs blocking OS calls off the async workers.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> ApiResult<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
 async fn device_info(
     Extension(cfg): Extension<Arc<DirectConfig>>,
     Extension(tech): Extension<Technician>,
-    headers: axum::http::HeaderMap,
-) -> Result<Json<DeviceState>, (StatusCode, Json<ApiError>)> {
-    let bad = |m: String| (StatusCode::BAD_REQUEST, Json(ApiError { error: m }));
-    match headers.get(PROTOCOL_HEADER).and_then(|v| v.to_str().ok()) {
-        Some(v) if is_compatible(v) => {}
-        other => {
-            return Err(bad(format!(
-                "protocol {other:?} not compatible with {PROTOCOL_VERSION}"
-            )));
-        }
-    }
+    headers: HeaderMap,
+) -> ApiResult<Json<DeviceState>> {
+    check_protocol(&headers)?;
     authorize(&cfg, &tech, Op::ReadDeviceInfo)?;
-    let state = tokio::task::spawn_blocking(collect::device_state)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
-    Ok(Json(state))
+    Ok(Json(blocking(collect::device_state).await?))
+}
+
+async fn list_processes(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    Extension(procs): Extension<Arc<Processes>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<ProcessInfo>>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::ListProcesses)?;
+    Ok(Json(blocking(move || procs.list()).await?))
+}
+
+async fn kill_process(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    Extension(procs): Extension<Arc<Processes>>,
+    headers: HeaderMap,
+    UrlPath(pid): UrlPath<u32>,
+    Json(req): Json<KillRequest>,
+) -> ApiResult<StatusCode> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::KillProcess)?;
+    let name = req.name.clone();
+    let result = blocking(move || procs.kill(pid, &req)).await?;
+    tracing::info!(technician = %tech.0, pid, process = %name, ok = result.is_ok(), detail = ?result.as_ref().err(), "process.kill");
+    result
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))
 }
 
 /// Serves direct management until `stop` fires.
@@ -225,7 +284,10 @@ pub async fn serve(
         axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls_config(&cfg, &state_dir)?));
     let app = Router::new()
         .route("/v1/device", get(device_info))
+        .route("/v1/processes", get(list_processes))
+        .route("/v1/processes/{pid}/kill", post(kill_process))
         .layer(Extension(Arc::new(cfg)))
+        .layer(Extension(Arc::new(Processes::new())))
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024));
     let handle = axum_server::Handle::new();
     let h = handle.clone();

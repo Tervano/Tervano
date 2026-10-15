@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.2";
+pub const PROTOCOL_VERSION: &str = "1.3";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -159,6 +159,30 @@ pub struct DeviceDetails {
     pub enrolled_at: Millis,
     pub last_seen: Millis,
     pub state: DeviceState,
+}
+
+/// One running process, as listed by an agent (`GET /v1/processes` on the direct channel).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProcessInfo {
+    pub pid: u32,
+    pub parent_pid: Option<u32>,
+    pub name: String,
+    pub exe: Option<String>,
+    /// `DOMAIN\user` or bare user; `None` when the agent cannot read the process owner.
+    pub user: Option<String>,
+    /// Share of total machine CPU since the previous listing, 0–100.
+    pub cpu_percent: f32,
+    pub memory_bytes: u64,
+    pub started_at: Millis,
+    /// "x64", "x86", "arm64"; `None` for processes the agent may not open.
+    pub arch: Option<String>,
+}
+
+/// Kill request body. `name` must match the process currently holding `pid`, so a PID reused
+/// since the technician's listing is never killed by mistake.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KillRequest {
+    pub name: String,
 }
 
 /// SSE event names on `GET /api/v1/stream`.

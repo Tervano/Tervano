@@ -31,6 +31,7 @@ rcgen = { version = "0.14", default-features = false, features = ["ring", "pem",
 x509-parser = "0.18"
 sha2 = "0.10"
 if-addrs = "0.15"
+sysinfo = { version = "0.38", default-features = false, features = ["system", "user"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"
@@ -40,4 +41,5 @@ windows = { version = "0.62", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Registry",
     "Win32_Security_Cryptography",
+    "Win32_System_Threading",
 ] }

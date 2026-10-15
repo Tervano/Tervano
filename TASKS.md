@@ -121,7 +121,7 @@ Status: `[ ]` todo · `[~]` locked / in progress by the owner · `[x]` done · `
 |---|---|---|---|---|
 | T-400 | [x] | claude | Agent direct listener: HTTPS (rustls) on `[direct].listen`, mandatory client certs, `GET /v1/device`; agent self-generated cert (key DPAPI-protected), `TervanoAgent direct-fingerprint` for pinning; `server_url` now optional (serverless agent) | Verified 2026-10-15 on Win 11 25H2 with a Python client pinning the fingerprint: alice→200, no protocol header→400; identity stable across restarts; server+direct combined mode OK. Console client is T-311 |
 | T-401 | [x] | claude | Direct authz: technician client certs from the org CA (`tervano-server cert tech --name`, ClientAuth EKU, CN = technician), optional `allowed_technicians`, every decision logged by the agent | Verified: bob (valid cert, not allowed)→403; no cert, rogue-CA cert, server cert as client → rejected in TLS handshake. Gaps: no CRL (revoke via allowlist + 1-year expiry), Kerberos option not done |
-| T-402 | [~] | claude | Agent-side per-operation authorization checks | §12.9. Hook exists: `direct::authorize(cfg, tech, Op)`; today one allowlist covers all ops — needs per-op roles (with T-806) as operations are added |
+| T-402 | [~] | claude | Agent-side per-operation authorization checks | §12.9. Done for current ops: `direct::authorize` checks every request; read ops → `allowed_technicians`, machine-changing ops → explicit `operators` (default nobody). Stays open until configurable per-op roles land with RBAC (T-806) |
 | T-403 | [ ] | | Server connection-authorization tickets (short-lived, signed) agents can verify offline | §2C non-negotiable outage behaviour |
 | T-404 | [ ] | | QUIC transport (quinn) with TCP/TLS fallback | §6 |
 
@@ -168,7 +168,7 @@ Each module: agent operation + authorization + audit + console tab. Build one fu
 
 | ID | Status | Owner | Task | Notes |
 |---|---|---|---|---|
-| T-700 | [~] | claude | Processes: list (pid, exe, owner, cpu, mem, arch), kill | |
+| T-700 | [x] | claude | Processes over the direct channel: list (pid, parent, name, exe, owner `DOMAIN\user`, CPU %, memory, start time, arch via IsWow64Process2) and terminate; Console Direct → Processes tab (filter, sort, two-step confirm) | Verified 2026-10-15 on Win 11 25H2 with the agent running as a normal user: 465 processes listed (owner resolved for 302, arch for 304; the rest belong to accounts a non-admin can't open, expect more as SYSTEM, unverified); an operator terminated a `ping` (it exited); refused: non-operator (403), PID/name mismatch, critical process (csrss), the agent itself. Console client exercised against the live agent; Processes tab not clicked by eye (T-314). Server-routed access needs relay (T-516) |
 | T-701 | [ ] | | Services: list, start/stop/pause/restart, startup type, deps, account | |
 | T-702 | [ ] | | Event logs: channels, filter (time/provider/level/id), details, export | no full-log download |
 | T-703 | [ ] | | Hardware inventory: CPU, RAM, disks, NICs, BIOS, model, serial, TPM, Secure Boot, BitLocker, battery | |

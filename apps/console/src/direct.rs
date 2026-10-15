@@ -168,37 +168,42 @@ pub async fn probe(address: String, creds: Creds) -> Result<String, String> {
     }
 }
 
-/// Reads live device state from the agent, refusing anything but the pinned certificate.
-pub async fn device(address: String, pin: String, creds: Creds) -> Result<DeviceState, String> {
-    let v = verifier(Some(pin.clone()));
-    let c = client(&creds, v.clone())?;
-    let res = c
-        .get(format!("https://{address}/v1/device"))
+/// One pinned agent plus the technician identity used to reach it.
+#[derive(Debug, Clone)]
+pub struct Target {
+    pub address: String,
+    pub pin: String,
+    pub creds: Creds,
+}
+
+/// Sends one request to a pinned agent and turns transport/HTTP failures into readable text.
+async fn send(
+    t: &Target,
+    build: impl FnOnce(&reqwest::Client, String) -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response, String> {
+    let v = verifier(Some(t.pin.clone()));
+    let c = client(&t.creds, v.clone())?;
+    let address = &t.address;
+    let res = build(&c, format!("https://{address}"))
         .send()
         .await
         .map_err(|e| {
             match v.seen.lock().expect("not poisoned").as_deref() {
-                Some(seen) if seen != pin => format!(
-                    "Certificate changed! {address} now presents {} but {} is pinned. This can mean \
-                     interception, or that the agent was reinstalled. Verify with \
-                     `TervanoAgent direct-fingerprint` on the endpoint before re-adding it.",
+                Some(seen) if seen != t.pin => format!(
+                    "Certificate changed! {address} now presents {} but {} is pinned. This can mean                      interception, or that the agent was reinstalled. Verify with                      `TervanoAgent direct-fingerprint` on the endpoint before re-adding it.",
                     display_fingerprint(seen),
-                    display_fingerprint(&pin)
+                    display_fingerprint(&t.pin)
                 ),
                 // Handshake passed our check, so a failure now is the agent refusing us or the network.
                 Some(_) => format!(
-                    "The agent at {address} refused the connection. Is your technician certificate \
-                     issued by the CA it trusts? ({e})"
+                    "The agent at {address} refused the connection. Is your technician certificate                      issued by the CA it trusts? ({e})"
                 ),
                 None => format!("Cannot reach agent at {address}: {e}"),
             }
         })?;
     let status = res.status();
     if status.is_success() {
-        return res
-            .json()
-            .await
-            .map_err(|e| format!("Unexpected agent response: {e}"));
+        return Ok(res);
     }
     let msg = res
         .json::<ApiError>()
@@ -207,6 +212,32 @@ pub async fn device(address: String, pin: String, creds: Creds) -> Result<Device
         .unwrap_or_default();
     Err(match status.as_u16() {
         403 => format!("Not authorized: {msg}"),
+        409 => msg,
         _ => format!("Agent error {status}: {msg}"),
     })
+}
+
+async fn json<T: serde::de::DeserializeOwned>(res: reqwest::Response) -> Result<T, String> {
+    res.json()
+        .await
+        .map_err(|e| format!("Unexpected agent response: {e}"))
+}
+
+/// Reads live device state from the agent, refusing anything but the pinned certificate.
+pub async fn device(t: Target) -> Result<DeviceState, String> {
+    json(send(&t, |c, base| c.get(format!("{base}/v1/device"))).await?).await
+}
+
+pub async fn processes(t: Target) -> Result<Vec<ProcessInfo>, String> {
+    json(send(&t, |c, base| c.get(format!("{base}/v1/processes"))).await?).await
+}
+
+/// Terminates `pid` only if it is still named `name` on the agent.
+pub async fn kill(t: Target, pid: u32, name: String) -> Result<(), String> {
+    send(&t, |c, base| {
+        c.post(format!("{base}/v1/processes/{pid}/kill"))
+            .json(&KillRequest { name })
+    })
+    .await
+    .map(|_| ())
 }

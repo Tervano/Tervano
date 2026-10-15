@@ -18,4 +18,5 @@ heartbeat_secs = 60
 # [direct]
 # listen = "0.0.0.0:8472"
 # technician_ca = 'C:\ProgramData\Tervano\Agent\ca.pem'
-# allowed_technicians = ["alice", "bob"]   # empty or omitted = any certificate from technician_ca
+# allowed_technicians = ["alice", "bob"]   # read-only access; empty or omitted = any certificate from technician_ca
+# operators = ["alice"]                      # may change the machine (terminate processes); empty = nobody
