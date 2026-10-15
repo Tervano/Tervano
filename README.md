@@ -59,6 +59,7 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Systems | Process management | Implemented | Windows | Direct channel: list with owner, CPU, memory and architecture; terminate after confirmation. Critical Windows processes and reused PIDs are refused; only technicians listed as `operators` may terminate |
 | Systems | Service management | Partial | Windows | Direct channel: list services with state, start type, account and dependencies; start/stop/restart/pause/resume and change start type (operators only, with confirmation). Successful changes not yet verified on an elevated agent |
 | Systems | Event log browsing | Implemented | Windows | Direct channel: any channel, filtered on the endpoint by level, provider, event ID and time window; newest first; CSV export |
+| Systems | Remote PowerShell / CMD | Implemented | Windows | Direct channel: run scripts as the agent's account with live output, exit code, timeout and stop (whole process tree); operators only; scripts are hashed in the log, not stored. Signed-in-user context not yet |
 | Systems | Registry management | Implemented | Windows | Direct channel: browse any hive (64/32-bit view), edit typed values, delete values/keys with confirmation, export `.reg`; changes are operator-only and logged |
 | Automation | Bulk actions | Planned | Windows | T-800+ |
 | Classroom | Live thumbnail grid | Planned | Windows | T-900+ |

@@ -6,7 +6,7 @@ mod direct;
 
 use iced::widget::{
     Space, button, checkbox, column, container, pick_list, progress_bar, row, rule, scrollable,
-    text, text_input,
+    text, text_editor, text_input,
 };
 use iced::{Alignment, Color, Element, Length, Subscription, Task, Theme};
 use serde::{Deserialize, Serialize};
@@ -158,7 +158,31 @@ enum Message {
     RegDone(Result<String, String>),
     RegExport,
     RegExported(Result<String, String>),
+    CmdShell(ShellChoice),
+    CmdEdit(text_editor::Action),
+    CmdTimeout(String),
+    CmdAskRun,
+    CmdConfirm,
+    CmdCancelConfirm,
+    CmdUpdate(Result<ExecStatus, String>),
+    CmdPoll,
+    CmdStop,
+    CmdStopped(Result<(), String>),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ShellChoice(Shell);
+
+impl std::fmt::Display for ShellChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self.0 {
+            Shell::Powershell => "PowerShell",
+            Shell::Cmd => "Command Prompt",
+        })
+    }
+}
+
+const SHELLS: [ShellChoice; 2] = [ShellChoice(Shell::Powershell), ShellChoice(Shell::Cmd)];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct HiveChoice(RegHive);
@@ -425,6 +449,7 @@ enum DirectTab {
     Hardware,
     Software,
     Registry,
+    Commands,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -503,6 +528,13 @@ struct Console {
     reg_recursive: bool,
     reg_confirm: Option<RegChange>,
     reg_notice: Option<Result<String, String>>,
+    cmd_shell: Shell,
+    cmd_script: text_editor::Content,
+    cmd_timeout: String,
+    cmd_confirm: bool,
+    /// The command started from this Console on the selected endpoint, with its address.
+    cmd_job: Option<(String, ExecStatus)>,
+    cmd_notice: Option<String>,
 }
 
 impl Console {
@@ -568,6 +600,12 @@ impl Console {
             reg_recursive: false,
             reg_confirm: None,
             reg_notice: None,
+            cmd_shell: Shell::Powershell,
+            cmd_script: text_editor::Content::new(),
+            cmd_timeout: "60".into(),
+            cmd_confirm: false,
+            cmd_job: None,
+            cmd_notice: None,
         };
         let task = if configured { c.search() } else { Task::none() };
         (c, task)
@@ -660,6 +698,8 @@ impl Console {
             DirectTab::Registry => Task::perform(direct::reg_key(t, self.reg_key()), move |r| {
                 Message::RegLoaded(addr.clone(), r)
             }),
+            // Commands are run on demand; nothing to refresh on the 15 s tick.
+            DirectTab::Commands => Task::none(),
         };
         Task::batch([device, tab])
     }
@@ -790,6 +830,12 @@ impl Console {
                     self.reg = None;
                     self.reg_confirm = None;
                     self.reg_notice = None;
+                    self.cmd_confirm = false;
+                    self.cmd_notice = None;
+                    // A running command keeps its job; it belongs to the endpoint it ran on.
+                    if self.cmd_job.as_ref().is_some_and(|(a, _)| a != &address) {
+                        self.cmd_job = None;
+                    }
                 }
                 self.direct_selected = Some(address.clone());
                 return self.load_direct(&address);
@@ -1041,6 +1087,60 @@ impl Console {
                 }
             }
             Message::RegExported(r) => self.reg_notice = Some(r),
+            Message::CmdShell(s) => self.cmd_shell = s.0,
+            Message::CmdEdit(a) => self.cmd_script.perform(a),
+            Message::CmdTimeout(t) => {
+                self.cmd_timeout = t.chars().filter(char::is_ascii_digit).take(4).collect()
+            }
+            Message::CmdAskRun => {
+                self.cmd_notice = None;
+                if self.cmd_script.text().trim().is_empty() {
+                    self.cmd_notice = Some("Write a script first.".into());
+                } else {
+                    self.cmd_confirm = true;
+                }
+            }
+            Message::CmdCancelConfirm => self.cmd_confirm = false,
+            Message::CmdConfirm => {
+                self.cmd_confirm = false;
+                if let Some(t) = self.direct_selected.as_deref().and_then(|a| self.target(a)) {
+                    let req = ExecRequest {
+                        shell: self.cmd_shell,
+                        script: self.cmd_script.text(),
+                        context: ExecContext::Agent,
+                        timeout_secs: self.cmd_timeout.parse().ok(),
+                    };
+                    self.cmd_job = None;
+                    return Task::perform(direct::exec_start(t, req), Message::CmdUpdate);
+                }
+            }
+            Message::CmdUpdate(r) => match r {
+                Ok(s) => {
+                    if let Some(addr) = self.direct_selected.clone() {
+                        self.cmd_job = Some((addr, s));
+                    }
+                }
+                Err(e) => self.cmd_notice = Some(e),
+            },
+            Message::CmdPoll => {
+                if let Some((addr, s)) = &self.cmd_job
+                    && let Some(t) = self.target(addr)
+                {
+                    return Task::perform(direct::exec_status(t, s.id), Message::CmdUpdate);
+                }
+            }
+            Message::CmdStop => {
+                if let Some((addr, s)) = &self.cmd_job
+                    && let Some(t) = self.target(addr)
+                {
+                    return Task::perform(direct::exec_cancel(t, s.id), Message::CmdStopped);
+                }
+            }
+            Message::CmdStopped(r) => {
+                if let Err(e) = r {
+                    self.cmd_notice = Some(e);
+                }
+            }
             Message::KillDone(r) => {
                 self.kill_notice = Some(r);
                 if let Some(addr) = self.direct_selected.clone() {
@@ -1097,6 +1197,16 @@ impl Console {
             }
             _ => Subscription::none(),
         };
+        let cmd_tick = if self
+            .cmd_job
+            .as_ref()
+            .is_some_and(|(_, s)| s.state == ExecState::Running)
+        {
+            iced::time::every(Duration::from_secs(1)).map(|_| Message::CmdPoll)
+        } else {
+            Subscription::none()
+        };
+        let direct_tick = Subscription::batch([direct_tick, cmd_tick]);
         if self.settings.token.is_empty() {
             return direct_tick;
         }
@@ -1420,6 +1530,7 @@ impl Console {
                             DirectTab::Hardware => self.hw_view(),
                             DirectTab::Software => self.sw_view(),
                             DirectTab::Registry => self.reg_view(),
+                            DirectTab::Commands => self.cmd_view(),
                         };
                         column![
                             row![
@@ -1429,7 +1540,8 @@ impl Console {
                                 tab("Events", DirectTab::Events),
                                 tab("Hardware", DirectTab::Hardware),
                                 tab("Software", DirectTab::Software),
-                                tab("Registry", DirectTab::Registry)
+                                tab("Registry", DirectTab::Registry),
+                                tab("Commands", DirectTab::Commands)
                             ]
                             .spacing(6),
                             body
@@ -1456,6 +1568,119 @@ impl Console {
             }
         };
         column![top, content].spacing(12).into()
+    }
+
+    fn cmd_view(&self) -> Element<'_, Message> {
+        let running = self
+            .cmd_job
+            .as_ref()
+            .is_some_and(|(_, s)| s.state == ExecState::Running);
+        let controls = row![
+            pick_list(SHELLS, Some(ShellChoice(self.cmd_shell)), Message::CmdShell).text_size(13),
+            text("Timeout (s)").size(13),
+            text_input("60", &self.cmd_timeout)
+                .on_input(Message::CmdTimeout)
+                .padding(6)
+                .width(70),
+            Space::new().width(Length::Fill),
+            button(text("Run"))
+                .style(button::primary)
+                .on_press_maybe((!running).then_some(Message::CmdAskRun)),
+            button(text("Stop"))
+                .style(button::danger)
+                .on_press_maybe(running.then_some(Message::CmdStop)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        let mut col = column![
+            text("Runs as the agent's own account (LocalSystem when installed as the service), not as the signed-in user. Output and exit code are captured; the script itself is not logged.")
+                .size(12)
+                .style(text::secondary),
+            controls,
+            text_editor(&self.cmd_script)
+                .placeholder("Get-Service | Where-Object Status -eq 'Stopped'")
+                .on_action(Message::CmdEdit)
+                .font(iced::Font::MONOSPACE)
+                .height(160),
+        ]
+        .spacing(8);
+        if self.cmd_confirm {
+            col = col.push(
+                container(
+                    column![
+                        text(format!(
+                            "Run this {} script on {} with the agent's privileges?",
+                            ShellChoice(self.cmd_shell),
+                            self.direct_selected.as_deref().unwrap_or("?")
+                        )),
+                        row![
+                            button(text("Run"))
+                                .style(button::danger)
+                                .on_press(Message::CmdConfirm),
+                            button(text("Cancel"))
+                                .style(button::secondary)
+                                .on_press(Message::CmdCancelConfirm),
+                        ]
+                        .spacing(8),
+                    ]
+                    .spacing(8),
+                )
+                .padding(10)
+                .width(Length::Fill)
+                .style(container::bordered_box),
+            );
+        }
+        if let Some(n) = &self.cmd_notice {
+            col = col.push(text(n.clone()).size(13).style(text::danger));
+        }
+        if let Some((_, s)) = &self.cmd_job {
+            let state = match s.state {
+                ExecState::Running => "running…".to_string(),
+                ExecState::Exited => format!(
+                    "exited with code {}",
+                    s.exit_code.map_or("?".into(), |c| c.to_string())
+                ),
+                ExecState::TimedOut => "timed out (process tree terminated)".into(),
+                ExecState::Cancelled => "stopped (process tree terminated)".into(),
+                ExecState::Failed => {
+                    format!("failed to start: {}", s.error.as_deref().unwrap_or(""))
+                }
+            };
+            let style = match (s.state, s.exit_code) {
+                (ExecState::Exited, Some(0)) => text::success,
+                (ExecState::Running, _) => text::secondary,
+                _ => text::danger,
+            };
+            let mut out = column![
+                text(format!(
+                    "{state}{}",
+                    if s.truncated {
+                        " · output truncated at 1 MiB"
+                    } else {
+                        ""
+                    }
+                ))
+                .size(13)
+                .style(style),
+                text(&s.stdout).size(12).font(iced::Font::MONOSPACE),
+            ]
+            .spacing(6);
+            if !s.stderr.is_empty() {
+                out = out.push(
+                    text(&s.stderr)
+                        .size(12)
+                        .font(iced::Font::MONOSPACE)
+                        .style(text::danger),
+                );
+            }
+            col = col.push(
+                container(scrollable(out).height(Length::Fill))
+                    .padding(8)
+                    .width(Length::Fill)
+                    .style(container::bordered_box),
+            );
+        }
+        col.into()
     }
 
     fn reg_key(&self) -> RegKeyPath {

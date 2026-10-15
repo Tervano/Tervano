@@ -1,6 +1,7 @@
 mod collect;
 mod direct;
 mod eventlog;
+mod exec;
 mod inventory;
 mod processes;
 #[cfg(windows)]

@@ -342,3 +342,17 @@ pub async fn reg_delete_key(t: Target, req: RegDeleteKeyRequest) -> Result<(), S
     .await
     .map(|_| ())
 }
+
+pub async fn exec_start(t: Target, req: ExecRequest) -> Result<ExecStatus, String> {
+    json(send(&t, |c, base| c.post(format!("{base}/v1/exec")).json(&req)).await?).await
+}
+
+pub async fn exec_status(t: Target, id: uuid::Uuid) -> Result<ExecStatus, String> {
+    json(send(&t, |c, base| c.get(format!("{base}/v1/exec/{id}"))).await?).await
+}
+
+pub async fn exec_cancel(t: Target, id: uuid::Uuid) -> Result<(), String> {
+    send(&t, |c, base| c.post(format!("{base}/v1/exec/{id}/cancel")))
+        .await
+        .map(|_| ())
+}

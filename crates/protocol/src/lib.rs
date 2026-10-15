@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.8";
+pub const PROTOCOL_VERSION: &str = "1.9";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -417,6 +417,59 @@ pub struct RegDeleteValueRequest {
 pub struct RegDeleteKeyRequest {
     pub key: RegKeyPath,
     pub recursive: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Shell {
+    Powershell,
+    Cmd,
+}
+
+/// Whose identity a remote command runs as (PLAN §7: never silently interchangeable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecContext {
+    /// The agent's own account: LocalSystem when installed as the service.
+    Agent,
+    /// The signed-in user's session. Requires the session helper; refused until it exists.
+    User,
+}
+
+/// Body of `POST /v1/exec`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecRequest {
+    pub shell: Shell,
+    pub script: String,
+    pub context: ExecContext,
+    /// Default 60, max 3600.
+    pub timeout_secs: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecState {
+    Running,
+    Exited,
+    TimedOut,
+    Cancelled,
+    /// Could not be started.
+    Failed,
+}
+
+/// `GET /v1/exec/{id}`: progress so far, final once `state` is not `running`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecStatus {
+    pub id: Uuid,
+    pub state: ExecState,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    /// Output beyond the per-stream cap (1 MiB) was dropped.
+    pub truncated: bool,
+    pub started_at: Millis,
+    pub finished_at: Option<Millis>,
+    pub error: Option<String>,
 }
 
 /// SSE event names on `GET /api/v1/stream`.

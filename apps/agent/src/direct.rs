@@ -6,7 +6,8 @@
 //! Authorization is checked here, per operation, never just in the Console (PLAN §12.9).
 
 use crate::{
-    collect, eventlog, inventory, processes::Processes, registry, secure, services, software,
+    collect, eventlog, exec::Jobs, inventory, processes::Processes, registry, secure, services,
+    software,
 };
 use anyhow::Context;
 use axum::{
@@ -69,6 +70,8 @@ enum Op {
     ReadInventory,
     ReadRegistry,
     WriteRegistry,
+    RunCommand,
+    CommandStatus,
 }
 
 impl Op {
@@ -84,6 +87,8 @@ impl Op {
             Op::ReadInventory => "inventory.read",
             Op::ReadRegistry => "registry.read",
             Op::WriteRegistry => "registry.write",
+            Op::RunCommand => "exec.run",
+            Op::CommandStatus => "exec.status",
         }
     }
 
@@ -91,7 +96,13 @@ impl Op {
     fn changes_machine(self) -> bool {
         matches!(
             self,
-            Op::KillProcess | Op::ControlService | Op::SetServiceStartType | Op::WriteRegistry
+            Op::KillProcess
+                | Op::ControlService
+                | Op::SetServiceStartType
+                | Op::WriteRegistry
+                | Op::RunCommand
+                // Command output can be as sensitive as running it.
+                | Op::CommandStatus
         )
     }
 }
@@ -131,7 +142,12 @@ fn authorize(cfg: &DirectConfig, tech: &Technician, op: Op) -> ApiResult<()> {
     } else {
         cfg.allowed_technicians.is_empty() || listed(&cfg.allowed_technicians)
     };
-    tracing::info!(technician = %tech.0, op = op.name(), allowed = ok, "direct request");
+    // Status polls arrive every second while a command runs; keep them out of the info log.
+    if matches!(op, Op::CommandStatus) && ok {
+        tracing::debug!(technician = %tech.0, op = op.name(), allowed = ok, "direct request");
+    } else {
+        tracing::info!(technician = %tech.0, op = op.name(), allowed = ok, "direct request");
+    }
     if ok {
         Ok(())
     } else {
@@ -491,6 +507,55 @@ async fn registry_delete_key(
     registry_change(&cfg, &tech, what, move || registry::delete_key(&req)).await
 }
 
+async fn exec_start(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    Extension(jobs): Extension<Arc<Jobs>>,
+    headers: HeaderMap,
+    Json(req): Json<ExecRequest>,
+) -> ApiResult<Json<ExecStatus>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::RunCommand)?;
+    let id = jobs
+        .start(&tech.0, req)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))?;
+    jobs.status(id)
+        .map(Json)
+        .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "command vanished"))
+}
+
+async fn exec_status(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    Extension(jobs): Extension<Arc<Jobs>>,
+    headers: HeaderMap,
+    UrlPath(id): UrlPath<uuid::Uuid>,
+) -> ApiResult<Json<ExecStatus>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::CommandStatus)?;
+    jobs.status(id).map(Json).ok_or_else(|| {
+        api_err(
+            StatusCode::NOT_FOUND,
+            "no such command (finished ones are kept 10 minutes)",
+        )
+    })
+}
+
+async fn exec_cancel(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    Extension(jobs): Extension<Arc<Jobs>>,
+    headers: HeaderMap,
+    UrlPath(id): UrlPath<uuid::Uuid>,
+) -> ApiResult<StatusCode> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::RunCommand)?;
+    tracing::info!(technician = %tech.0, %id, "exec cancel");
+    jobs.cancel(id)
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))
+}
+
 /// Serves direct management until `stop` fires.
 pub async fn serve(
     cfg: DirectConfig,
@@ -514,6 +579,9 @@ pub async fn serve(
         .route("/v1/registry/value", post(registry_set_value))
         .route("/v1/registry/value/delete", post(registry_delete_value))
         .route("/v1/registry/key/delete", post(registry_delete_key))
+        .route("/v1/exec", post(exec_start))
+        .route("/v1/exec/{id}", get(exec_status))
+        .route("/v1/exec/{id}/cancel", post(exec_cancel))
         .route("/v1/services/{name}/control", post(control_service))
         .route(
             "/v1/services/{name}/start-type",
@@ -521,7 +589,9 @@ pub async fn serve(
         )
         .layer(Extension(Arc::new(cfg)))
         .layer(Extension(Arc::new(Processes::new())))
-        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024));
+        .layer(Extension(Arc::new(Jobs::new(state_dir.clone()))))
+        // Scripts are capped at 64 KiB; leave room for the JSON envelope.
+        .layer(axum::extract::DefaultBodyLimit::max(96 * 1024));
     let handle = axum_server::Handle::new();
     let h = handle.clone();
     tokio::spawn(async move {
