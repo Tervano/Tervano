@@ -25,6 +25,7 @@ pub struct Config {
     pub listen: String,
     pub database_url: String,
     pub offline_after_secs: u64,
+    pub event_retention_days: u32,
     /// PEM certificate chain and private key. Required unless `listen` is loopback.
     pub tls_cert: Option<std::path::PathBuf>,
     pub tls_key: Option<std::path::PathBuf>,
@@ -36,6 +37,7 @@ impl Default for Config {
             listen: "127.0.0.1:8470".into(),
             database_url: "sqlite://tervano.db?mode=rwc".into(),
             offline_after_secs: 180,
+            event_retention_days: 30,
             tls_cert: None,
             tls_key: None,
         }
@@ -59,6 +61,10 @@ impl Config {
         anyhow::ensure!(
             self.offline_after_secs >= 10,
             "offline_after_secs must be >= 10"
+        );
+        anyhow::ensure!(
+            self.event_retention_days >= 1,
+            "event_retention_days must be >= 1"
         );
         Ok(())
     }
@@ -109,6 +115,46 @@ pub fn spawn_offline_sweeper(state: AppState) {
             match ids {
                 Ok(ids) => ids.iter().for_each(|id| state.publish(id)),
                 Err(e) => tracing::warn!("offline sweep failed: {e}"),
+            }
+        }
+    });
+}
+
+/// Removes old device event snapshots at startup and hourly, without monopolizing SQLite writes.
+pub fn spawn_event_purger(db: SqlitePool, retention_days: u32) {
+    let retention_ms = i64::from(retention_days) * 86_400_000;
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60 * 60));
+        loop {
+            tick.tick().await;
+            let cutoff = now_millis() - retention_ms;
+            let mut deleted = 0;
+            loop {
+                let result = sqlx::query(
+                    "DELETE FROM device_events WHERE rowid IN (
+                        SELECT rowid FROM device_events WHERE received_at < ?
+                        ORDER BY received_at LIMIT 1000)",
+                )
+                .bind(cutoff)
+                .execute(&db)
+                .await;
+                match result {
+                    Ok(result) => {
+                        let count = result.rows_affected();
+                        deleted += count;
+                        if count < 1000 {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("event purge failed: {e}");
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if deleted > 0 {
+                tracing::info!(deleted, retention_days, "old device events purged");
             }
         }
     });
@@ -483,7 +529,6 @@ async fn ingest_events(
         last_seq = seq;
         changed |= was_offline || !matches!(ev.kind, EventKind::Heartbeat);
         if !matches!(ev.kind, EventKind::Heartbeat) {
-            // shortcut: state snapshots accumulate until configurable retention is added (T-120).
             sqlx::query("INSERT INTO device_events (device_id, seq, received_at, event_json) VALUES (?, ?, ?, ?)")
                 .bind(&dev.id)
                 .bind(seq)

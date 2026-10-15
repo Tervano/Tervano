@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use std::{path::PathBuf, time::Duration};
 use tervano_server::{
     AppState, Config, app, audit, connect, create_enrollment_token, create_technician,
-    spawn_offline_sweeper,
+    spawn_event_purger, spawn_offline_sweeper,
 };
 
 #[derive(Parser)]
@@ -121,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
             let addr: std::net::SocketAddr = cfg.listen.parse()?;
             let state = AppState::new(db, cfg.offline_after_secs as i64 * 1000);
             spawn_offline_sweeper(state.clone());
+            spawn_event_purger(state.db.clone(), cfg.event_retention_days);
             let router = app(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
             let handle = axum_server::Handle::new();
             let h = handle.clone();

@@ -16,7 +16,7 @@ flowchart LR
     A1[Tervano Agent<br/>Windows service] -- enroll, state events,<br/>heartbeats --> S
     A2[Tervano Agent] --> S
     S -. directory sync<br/>planned .-> AD[(Active Directory)]
-    C -. direct management<br/>planned, serverless mode .-> A1
+    C -- direct device read<br/>mTLS + certificate pin --> A1
     C -. optional relay<br/>planned .-> S
 ```
 
@@ -24,7 +24,9 @@ flowchart LR
 - **Server** (`tervano-server`) — optional. Indexes device state so searches ("which PC is *jdoe* on?") never hit domain controllers or every endpoint. Stores only SHA-256 hashes of enrollment tokens, device secrets and technician tokens.
 - **Console** (`TervanoConsole.exe`) — native Iced app (no Electron/Chromium).
 
-**Why the server is optional:** it accelerates discovery and centralizes policy, but direct Console→Agent management (planned, T-400) must keep working during a server outage.
+**Why the server is optional:** it accelerates discovery and centralizes policy; direct Console→Agent device reads already work during a server outage. Further direct operations are planned.
+
+Architecture decisions: [Iced Console](docs/adr/0001-iced-console.md), [SQLite first](docs/adr/0002-sqlite-first.md), and [HTTP+JSON for Phase 1](docs/adr/0003-http-json-phase1.md).
 
 ## Feature status
 
@@ -40,7 +42,7 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Agent | Change detection | Partial | Windows | Poll-and-diff every `poll_secs`; event-driven notifications are T-209/T-210 |
 | Server | Device index + search | Implemented | Win/Linux | Prefix search by hostname, username, `DOMAIN\user`, IP. Tests: [api.rs](apps/server/tests/api.rs). Not yet benchmarked (T-112) |
 | Server | Online/offline tracking | Implemented | Win/Linux | Heartbeat timeout + immediate offline on agent shutdown |
-| Server | Device event history | Implemented | Win/Linux | Authenticated `GET /api/v1/devices/{id}/events`, newest first with `before` and `limit` (max 100). New startup/state/shutdown events only; heartbeat excluded. Retention pending (T-120) |
+| Server | Device event history | Implemented | Win/Linux | Authenticated `GET /api/v1/devices/{id}/events`, newest first with `before` and `limit` (max 100). Startup/state/shutdown events only; heartbeat excluded. Rows older than `event_retention_days` (default 30) are purged at startup and hourly, including existing old rows on upgrade |
 | Discovery | Find computers by hostname | Implemented | Windows | Via server |
 | Discovery | Find computers by logged-in user | Implemented | Windows | From real agent session data, not AD attributes |
 | Console | Search, device list, device details | Implemented | Windows | Loading / empty / error states |
