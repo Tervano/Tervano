@@ -43,6 +43,7 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Server | Device index + search | Implemented | Win/Linux | Prefix search by hostname, username, `DOMAIN\user`, IP. Tests: [api.rs](apps/server/tests/api.rs). Not yet benchmarked (T-112) |
 | Server | Online/offline tracking | Implemented | Win/Linux | Heartbeat timeout + immediate offline on agent shutdown |
 | Server | Device event history | Implemented | Win/Linux | Authenticated `GET /api/v1/devices/{id}/events`, newest first with `before` and `limit` (max 100). Startup/state/shutdown events only; heartbeat excluded. Rows older than `event_retention_days` (default 30) are purged at startup and hourly, including existing old rows on upgrade |
+| Server | Metrics | Implemented | Win/Linux | Authenticated Prometheus text at `GET /metrics`: accepted agent events since process start, device counts, and retained event rows. No device identifiers or user data in metrics |
 | Discovery | Find computers by hostname | Implemented | Windows | Via server |
 | Discovery | Find computers by logged-in user | Implemented | Windows | From real agent session data, not AD attributes |
 | Console | Search, device list, device details | Implemented | Windows | Loading / empty / error states |
@@ -97,6 +98,19 @@ Create `dev-data/agent.toml` from [agent.example.toml](apps/agent/agent.example.
 
 Run `target/debug/TervanoConsole`, paste the technician token in Settings, and search.
 
+**Server metrics:** `GET /metrics` uses Prometheus text format and requires a
+technician bearer token. For example, from the machine running the Server:
+
+```bash
+curl -H "Authorization: Bearer $TECH_TOKEN" http://127.0.0.1:8470/metrics
+```
+
+The accepted-event counter includes heartbeats, ignores replayed sequences, and
+resets when the Server restarts. The stored-event gauge counts rows remaining
+after retention. Configure a Prometheus scrape with a technician bearer token;
+use HTTPS for a Server outside loopback. No protocol-version header is needed
+for this metrics endpoint.
+
 **Agent as a Windows service** (elevated prompt): put `agent.toml` in `%ProgramData%\Tervano\Agent\`, then `TervanoAgent service install` and `sc start TervanoAgent`. Logs go to `%ProgramData%\Tervano\Agent\agent.log`. Remove with `TervanoAgent service uninstall`.
 
 **Serving to other machines (TLS):** the server refuses a non-loopback `listen` without TLS, and agents/consoles refuse `http://` to anything but loopback.
@@ -115,7 +129,7 @@ Installers (MSI) and Linux/container server packaging are planned (T-950–T-952
 
 ## Development
 
-See [AGENTS.md](AGENTS.md) for layout, conventions and the commands that must pass (`cargo test --workspace`, `cargo clippy … -D warnings`, `cargo fmt`). Work is coordinated through [TASKS.md](TASKS.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) to get started, [AGENTS.md](AGENTS.md) for layout and required gates, and [TASKS.md](TASKS.md) for task ownership. The [Code of Conduct](CODE_OF_CONDUCT.md) applies to project spaces. Generate the [third-party license inventory](THIRD_PARTY_LICENSES.md) from Cargo.lock after dependency changes.
 
 ## Roadmap
 
@@ -132,8 +146,8 @@ Phases from [PLAN.md](PLAN.md) §16, tracked in detail in [TASKS.md](TASKS.md):
 
 ## Security & privacy
 
-Intended model (PLAN §12): mutual authentication, TLS everywhere, per-operation authorization enforced on the agent, append-only audit, mandatory visible notification for any interactive remote session, classroom recording off by default. **Today** the Server uses TLS off loopback, bearer-token authentication, hashed secrets, and a limited append-only audit log. The Windows Agent protects its device secret with DPAPI; direct Console→Agent connections use mutual TLS and a pinned Agent certificate. Role-based access and mutual TLS device identity to the Server remain planned. See the [current security model](docs/security-model.md) for trust boundaries and known gaps. Report vulnerabilities privately to the maintainers (SECURITY.md is T-012).
+Intended model (PLAN §12): mutual authentication, TLS everywhere, per-operation authorization enforced on the agent, append-only audit, mandatory visible notification for any interactive remote session, classroom recording off by default. **Today** the Server uses TLS off loopback, bearer-token authentication, hashed secrets, and a limited append-only audit log. The Windows Agent protects its device secret with DPAPI; direct Console→Agent connections use mutual TLS and a pinned Agent certificate. Role-based access and mutual TLS device identity to the Server remain planned. See the [current security model](docs/security-model.md) for trust boundaries and known gaps. Report vulnerabilities through the private path in [SECURITY.md](SECURITY.md).
 
 ## License
 
-[Apache License 2.0](LICENSE).
+[Apache License 2.0](LICENSE). Resolved Cargo dependencies and their declared licenses are listed in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

@@ -14,6 +14,10 @@ use sqlx::{Row, SqlitePool, sqlite::SqliteConnectOptions};
 use std::{
     net::{IpAddr, SocketAddr},
     str::FromStr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use tervano_protocol::*;
@@ -76,6 +80,8 @@ pub struct AppState {
     pub offline_after_ms: i64,
     /// Ids of devices whose summary may have changed; fanned out to `/api/v1/stream` clients.
     pub changes: tokio::sync::broadcast::Sender<Uuid>,
+    accepted_events: Arc<AtomicU64>,
+    started_at_seconds: i64,
 }
 
 impl AppState {
@@ -86,6 +92,8 @@ impl AppState {
             db,
             offline_after_ms,
             changes,
+            accepted_events: Arc::new(AtomicU64::new(0)),
+            started_at_seconds: now_millis() / 1000,
         }
     }
 
@@ -236,6 +244,7 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(readyz))
+        .route("/metrics", get(metrics))
         .nest("/api/v1", api)
         .with_state(state)
 }
@@ -245,6 +254,48 @@ async fn readyz(State(s): State<AppState>) -> StatusCode {
         Ok(_) => StatusCode::OK,
         Err(_) => StatusCode::SERVICE_UNAVAILABLE,
     }
+}
+
+/// Prometheus text exposition; only aggregate counts are exposed to authenticated technicians.
+async fn metrics(
+    State(s): State<AppState>,
+    _tech: TechAuth,
+) -> Result<impl IntoResponse, AppError> {
+    let cutoff = now_millis() - s.offline_after_ms;
+    let (devices, online, stored_events): (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM devices WHERE revoked = 0),
+                (SELECT COUNT(*) FROM devices WHERE revoked = 0 AND last_seen > ?),
+                (SELECT COUNT(*) FROM device_events)",
+    )
+    .bind(cutoff)
+    .fetch_one(&s.db)
+    .await?;
+    let body = format!(
+        "# HELP tervano_server_start_time_seconds Unix time when this Server process started.\n\
+         # TYPE tervano_server_start_time_seconds gauge\n\
+         tervano_server_start_time_seconds {}\n\
+         # HELP tervano_agent_events_accepted_total Agent events accepted since this Server process started.\n\
+         # TYPE tervano_agent_events_accepted_total counter\n\
+         tervano_agent_events_accepted_total {}\n\
+         # HELP tervano_devices_enrolled Enrolled devices that are not revoked.\n\
+         # TYPE tervano_devices_enrolled gauge\n\
+         tervano_devices_enrolled {devices}\n\
+         # HELP tervano_devices_online Non-revoked devices inside the offline timeout.\n\
+         # TYPE tervano_devices_online gauge\n\
+         tervano_devices_online {online}\n\
+         # HELP tervano_device_events_stored Device history rows currently stored after retention.\n\
+         # TYPE tervano_device_events_stored gauge\n\
+         tervano_device_events_stored {stored_events}\n",
+        s.started_at_seconds,
+        s.accepted_events.load(Ordering::Relaxed),
+    );
+    Ok((
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    ))
 }
 
 async fn require_protocol(req: Request, next: Next) -> Response {
@@ -519,6 +570,7 @@ async fn ingest_events(
     // A device coming back from offline is a visible change even if only a heartbeat arrived.
     let was_offline = prev_seen <= now - s.offline_after_ms;
     let mut changed = false;
+    let mut accepted = 0;
     for ev in events {
         let seq = i64::try_from(ev.seq).map_err(|_| {
             AppError::new(err(StatusCode::BAD_REQUEST, "event seq exceeds maximum"))
@@ -527,6 +579,7 @@ async fn ingest_events(
             continue;
         }
         last_seq = seq;
+        accepted += 1;
         changed |= was_offline || !matches!(ev.kind, EventKind::Heartbeat);
         if !matches!(ev.kind, EventKind::Heartbeat) {
             sqlx::query("INSERT INTO device_events (device_id, seq, received_at, event_json) VALUES (?, ?, ?, ?)")
@@ -567,6 +620,7 @@ async fn ingest_events(
             .await?;
     }
     tx.commit().await?;
+    s.accepted_events.fetch_add(accepted, Ordering::Relaxed);
     if changed {
         s.publish(&dev.id);
     }
