@@ -98,7 +98,7 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-308 | [ ] | | Keyboard-first: Ctrl+K focus search, arrows/Enter in results, command palette | §11 |
 | T-309 | [ ] | | Recent devices, favorites, search history | §11 |
 | T-310 | [x] | claude | Console live updates: SSE subscription with reconnect backoff (1→30 s), 45 s dead-connection timeout, 1 s debounced refresh; 15 s polling only while disconnected; status line shows live/polling | Verified 2026-10-15: Console logged both pushes within ~1 s; server restart → reconnected in 3 s. Visual status text not checked by eye. Shortcut: refresh re-runs whole search (T-307) |
-| T-311 | [ ] | | Serverless mode in Console: manual endpoint list, technician cert + key settings, pin agent fingerprint (TOFU with explicit confirm), call agent `GET /v1/device` | §2A, §22. Agent side done (T-400/T-401) |
+| T-311 | [~] | claude | Serverless mode in Console: manual endpoint list, technician cert + key settings, pin agent fingerprint (TOFU with explicit confirm), call agent `GET /v1/device` | §2A, §22. Agent side done (T-400/T-401) |
 | T-312 | [ ] | | Tabs / multi-window device admin | §11 |
 | T-313 | [ ] | | Real screenshots into README | §19H |
 
