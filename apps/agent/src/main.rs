@@ -4,6 +4,7 @@ mod processes;
 mod secure;
 #[cfg(windows)]
 mod service;
+mod services;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};

@@ -5,7 +5,7 @@
 //! certificate, which consoles pin by SHA-256 fingerprint (`TervanoAgent direct-fingerprint`).
 //! Authorization is checked here, per operation, never just in the Console (PLAN §12.9).
 
-use crate::{collect, processes::Processes, secure};
+use crate::{collect, processes::Processes, secure, services};
 use anyhow::Context;
 use axum::{
     Extension, Json, Router,
@@ -60,6 +60,9 @@ enum Op {
     ReadDeviceInfo,
     ListProcesses,
     KillProcess,
+    ListServices,
+    ControlService,
+    SetServiceStartType,
 }
 
 impl Op {
@@ -68,12 +71,18 @@ impl Op {
             Op::ReadDeviceInfo => "device.read",
             Op::ListProcesses => "process.list",
             Op::KillProcess => "process.kill",
+            Op::ListServices => "service.list",
+            Op::ControlService => "service.control",
+            Op::SetServiceStartType => "service.start_type",
         }
     }
 
     /// Operations that change the machine need an explicit `operators` entry.
     fn changes_machine(self) -> bool {
-        matches!(self, Op::KillProcess)
+        matches!(
+            self,
+            Op::KillProcess | Op::ControlService | Op::SetServiceStartType
+        )
     }
 }
 
@@ -273,6 +282,73 @@ async fn kill_process(
         .map_err(|e| api_err(StatusCode::CONFLICT, e))
 }
 
+async fn list_services(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<ServiceEntry>>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::ListServices)?;
+    blocking(services::list)
+        .await?
+        .map(Json)
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+/// Logs a machine-changing service operation with its outcome, then maps it to a response.
+fn service_outcome(
+    tech: &Technician,
+    op: Op,
+    name: &str,
+    what: String,
+    result: Result<ServiceEntry, String>,
+) -> ApiResult<Json<ServiceEntry>> {
+    tracing::info!(technician = %tech.0, op = op.name(), service = name, what, ok = result.is_ok(), detail = ?result.as_ref().err(), "service change");
+    result
+        .map(Json)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))
+}
+
+async fn control_service(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+    Json(req): Json<ServiceControlRequest>,
+) -> ApiResult<Json<ServiceEntry>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::ControlService)?;
+    let n = name.clone();
+    let result = blocking(move || services::control(&n, req.action)).await?;
+    service_outcome(
+        &tech,
+        Op::ControlService,
+        &name,
+        format!("{:?}", req.action),
+        result,
+    )
+}
+
+async fn set_service_start_type(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+    Json(req): Json<StartTypeRequest>,
+) -> ApiResult<Json<ServiceEntry>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::SetServiceStartType)?;
+    let n = name.clone();
+    let result = blocking(move || services::set_start_type(&n, req.start_type)).await?;
+    service_outcome(
+        &tech,
+        Op::SetServiceStartType,
+        &name,
+        format!("{:?}", req.start_type),
+        result,
+    )
+}
+
 /// Serves direct management until `stop` fires.
 pub async fn serve(
     cfg: DirectConfig,
@@ -286,6 +362,12 @@ pub async fn serve(
         .route("/v1/device", get(device_info))
         .route("/v1/processes", get(list_processes))
         .route("/v1/processes/{pid}/kill", post(kill_process))
+        .route("/v1/services", get(list_services))
+        .route("/v1/services/{name}/control", post(control_service))
+        .route(
+            "/v1/services/{name}/start-type",
+            post(set_service_start_type),
+        )
         .layer(Extension(Arc::new(cfg)))
         .layer(Extension(Arc::new(Processes::new())))
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024));

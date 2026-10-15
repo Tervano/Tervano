@@ -241,3 +241,36 @@ pub async fn kill(t: Target, pid: u32, name: String) -> Result<(), String> {
     .await
     .map(|_| ())
 }
+
+pub async fn services(t: Target) -> Result<Vec<ServiceEntry>, String> {
+    json(send(&t, |c, base| c.get(format!("{base}/v1/services"))).await?).await
+}
+
+/// Starts/stops/pauses/resumes/restarts a service; the agent waits for it to settle.
+pub async fn control_service(
+    t: Target,
+    name: String,
+    action: ServiceAction,
+) -> Result<ServiceEntry, String> {
+    let res = send(&t, |c, base| {
+        c.post(format!("{base}/v1/services/{name}/control"))
+            .json(&ServiceControlRequest { action })
+            // Restart waits for stop + start on the agent (up to 30 s each).
+            .timeout(Duration::from_secs(75))
+    })
+    .await?;
+    json(res).await
+}
+
+pub async fn set_start_type(
+    t: Target,
+    name: String,
+    start_type: StartType,
+) -> Result<ServiceEntry, String> {
+    let res = send(&t, |c, base| {
+        c.post(format!("{base}/v1/services/{name}/start-type"))
+            .json(&StartTypeRequest { start_type })
+    })
+    .await?;
+    json(res).await
+}

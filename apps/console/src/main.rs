@@ -4,7 +4,9 @@
 mod api;
 mod direct;
 
-use iced::widget::{Space, button, column, container, row, rule, scrollable, text, text_input};
+use iced::widget::{
+    Space, button, column, container, pick_list, row, rule, scrollable, text, text_input,
+};
 use iced::{Alignment, Color, Element, Length, Subscription, Task, Theme};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -116,12 +118,57 @@ enum Message {
     KillConfirm,
     KillCancel,
     KillDone(Result<String, String>),
+    SvcsLoaded(String, Result<Vec<ServiceEntry>, String>),
+    SvcFilter(String),
+    SvcAsk(SvcChange),
+    SvcConfirm,
+    SvcCancel,
+    SvcDone(Result<String, String>),
 }
+
+/// A service change awaiting the technician's confirmation.
+#[derive(Debug, Clone)]
+enum SvcChange {
+    Control(String, ServiceAction),
+    StartType(String, StartType),
+}
+
+impl SvcChange {
+    fn describe(&self) -> String {
+        match self {
+            SvcChange::Control(n, a) => format!("{a:?} service {n}"),
+            SvcChange::StartType(n, t) => format!("Set {n} to start {}", StartChoice(*t)),
+        }
+    }
+}
+
+/// Settable start types, for the picker.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StartChoice(StartType);
+
+impl std::fmt::Display for StartChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self.0 {
+            StartType::Automatic => "Automatic",
+            StartType::Manual => "Manual",
+            StartType::Disabled => "Disabled",
+            StartType::Boot => "Boot",
+            StartType::System => "System",
+        })
+    }
+}
+
+const START_CHOICES: [StartChoice; 3] = [
+    StartChoice(StartType::Automatic),
+    StartChoice(StartType::Manual),
+    StartChoice(StartType::Disabled),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum DirectTab {
     Summary,
     Processes,
+    Services,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -169,6 +216,12 @@ struct Console {
     /// (pid, name) awaiting the technician's "Terminate" confirmation.
     confirm_kill: Option<(u32, String)>,
     kill_notice: Option<Result<String, String>>,
+    svcs: Option<(String, Result<Vec<ServiceEntry>, String>)>,
+    svc_filter: String,
+    svc_confirm: Option<SvcChange>,
+    svc_notice: Option<Result<String, String>>,
+    /// A service change is running on the agent (restart can take tens of seconds).
+    svc_busy: bool,
 }
 
 impl Console {
@@ -206,6 +259,11 @@ impl Console {
             proc_sort: ProcSort::Cpu,
             confirm_kill: None,
             kill_notice: None,
+            svcs: None,
+            svc_filter: String::new(),
+            svc_confirm: None,
+            svc_notice: None,
+            svc_busy: false,
         };
         let task = if configured { c.search() } else { Task::none() };
         (c, task)
@@ -266,13 +324,16 @@ impl Console {
             let addr = addr.clone();
             move |r| Message::DirectLoaded(addr.clone(), r)
         });
-        if self.direct_tab != DirectTab::Processes {
-            return device;
-        }
-        let procs = Task::perform(direct::processes(t), move |r| {
-            Message::ProcsLoaded(addr.clone(), r)
-        });
-        Task::batch([device, procs])
+        let tab = match self.direct_tab {
+            DirectTab::Summary => return device,
+            DirectTab::Processes => Task::perform(direct::processes(t), move |r| {
+                Message::ProcsLoaded(addr.clone(), r)
+            }),
+            DirectTab::Services => Task::perform(direct::services(t), move |r| {
+                Message::SvcsLoaded(addr.clone(), r)
+            }),
+        };
+        Task::batch([device, tab])
     }
 
     fn save_settings(&mut self) {
@@ -389,6 +450,9 @@ impl Console {
                     self.procs = None;
                     self.confirm_kill = None;
                     self.kill_notice = None;
+                    self.svcs = None;
+                    self.svc_confirm = None;
+                    self.svc_notice = None;
                 }
                 self.direct_selected = Some(address.clone());
                 return self.load_direct(&address);
@@ -420,6 +484,44 @@ impl Console {
                     return Task::perform(direct::kill(t, pid, name), move |r| {
                         Message::KillDone(r.map(|()| format!("Terminated {label}.")))
                     });
+                }
+            }
+            Message::SvcsLoaded(address, r) => {
+                if self.direct_selected.as_deref() == Some(address.as_str()) {
+                    self.svcs = Some((address, r));
+                }
+            }
+            Message::SvcFilter(f) => self.svc_filter = f,
+            Message::SvcAsk(change) => {
+                self.svc_notice = None;
+                self.svc_confirm = Some(change);
+            }
+            Message::SvcCancel => self.svc_confirm = None,
+            Message::SvcConfirm => {
+                if let (Some(change), Some(t)) = (
+                    self.svc_confirm.take(),
+                    self.direct_selected.as_deref().and_then(|a| self.target(a)),
+                ) {
+                    self.svc_busy = true;
+                    let done = change.describe();
+                    let to_msg = move |r: Result<ServiceEntry, String>| {
+                        Message::SvcDone(r.map(|s| format!("{done}: now {}.", s.state)))
+                    };
+                    return match change {
+                        SvcChange::Control(n, a) => {
+                            Task::perform(direct::control_service(t, n, a), to_msg)
+                        }
+                        SvcChange::StartType(n, st) => {
+                            Task::perform(direct::set_start_type(t, n, st), to_msg)
+                        }
+                    };
+                }
+            }
+            Message::SvcDone(r) => {
+                self.svc_busy = false;
+                self.svc_notice = Some(r);
+                if let Some(addr) = self.direct_selected.clone() {
+                    return self.load_direct(&addr);
                 }
             }
             Message::KillDone(r) => {
@@ -796,11 +898,13 @@ impl Console {
                                 vec![],
                             ),
                             DirectTab::Processes => self.procs_view(),
+                            DirectTab::Services => self.svcs_view(),
                         };
                         column![
                             row![
                                 tab("Summary", DirectTab::Summary),
-                                tab("Processes", DirectTab::Processes)
+                                tab("Processes", DirectTab::Processes),
+                                tab("Services", DirectTab::Services)
                             ]
                             .spacing(6),
                             body
@@ -809,11 +913,17 @@ impl Console {
                         .into()
                     }
                 };
+                // Tables need room: shrink the endpoint list while one is open.
+                let (list_w, panel_w) = if self.direct_tab == DirectTab::Summary {
+                    (3, 2)
+                } else {
+                    (1, 3)
+                };
                 row![
-                    container(list).width(Length::FillPortion(3)),
+                    container(list).width(Length::FillPortion(list_w)),
                     rule::vertical(1),
                     container(panel)
-                        .width(Length::FillPortion(2))
+                        .width(Length::FillPortion(panel_w))
                         .padding([0, 8]),
                 ]
                 .spacing(12)
@@ -821,6 +931,153 @@ impl Console {
             }
         };
         column![top, content].spacing(12).into()
+    }
+
+    fn svcs_view(&self) -> Element<'_, Message> {
+        let list = match &self.svcs {
+            None => return centered("Loading services…"),
+            Some((_, Err(e))) => return error_box(e),
+            Some((_, Ok(list))) => list,
+        };
+        let f = self.svc_filter.to_lowercase();
+        let shown: Vec<&ServiceEntry> = list
+            .iter()
+            .filter(|s| {
+                f.is_empty()
+                    || s.name.to_lowercase().contains(&f)
+                    || s.display_name.to_lowercase().contains(&f)
+                    || s.state.contains(&f)
+            })
+            .collect();
+
+        let small = |label: &'static str, msg: Option<Message>| {
+            button(text(label).size(12))
+                .style(button::subtle)
+                .padding([2, 6])
+                .on_press_maybe(msg.filter(|_| !self.svc_busy))
+        };
+        let header = row![
+            text("Service").size(12).width(Length::FillPortion(4)),
+            text("State").size(12).width(Length::FillPortion(2)),
+            text("Startup").size(12).width(Length::FillPortion(2)),
+            text("Account").size(12).width(Length::FillPortion(3)),
+            Space::new().width(170),
+        ]
+        .spacing(4);
+        // shortcut: renders every matching row (~300); virtualize with T-307.
+        let rows = shown.iter().map(|s| {
+            let ctl =
+                |a: ServiceAction| Some(Message::SvcAsk(SvcChange::Control(s.name.clone(), a)));
+            let running = s.state == "running";
+            let stopped = s.state == "stopped";
+            let name = s.name.clone();
+            let startup: Element<_> = match s.start_type {
+                Some(st @ (StartType::Automatic | StartType::Manual | StartType::Disabled)) => {
+                    pick_list(
+                        START_CHOICES,
+                        Some(StartChoice(st)),
+                        move |c: StartChoice| {
+                            Message::SvcAsk(SvcChange::StartType(name.clone(), c.0))
+                        },
+                    )
+                    .text_size(12)
+                    .padding([2, 6])
+                    .into()
+                }
+                Some(other) => text(StartChoice(other).to_string()).size(13).into(),
+                None => text("—").size(13).into(),
+            };
+            row![
+                column![
+                    text(&s.display_name).size(13),
+                    text(&s.name).size(11).style(text::secondary)
+                ]
+                .width(Length::FillPortion(4)),
+                text(s.state.replace('_', " "))
+                    .size(13)
+                    .width(Length::FillPortion(2)),
+                container(startup).width(Length::FillPortion(2)),
+                text(s.account.as_deref().unwrap_or("—"))
+                    .size(12)
+                    .width(Length::FillPortion(3)),
+                row![
+                    small(
+                        "Start",
+                        stopped.then(|| ctl(ServiceAction::Start)).flatten()
+                    ),
+                    small(
+                        "Stop",
+                        (running && s.can_stop)
+                            .then(|| ctl(ServiceAction::Stop))
+                            .flatten()
+                    ),
+                    small(
+                        "Restart",
+                        (running && s.can_stop)
+                            .then(|| ctl(ServiceAction::Restart))
+                            .flatten()
+                    ),
+                ]
+                .spacing(2)
+                .width(170),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center)
+            .into()
+        });
+
+        let mut col = column![
+            text_input("Filter by name or state…", &self.svc_filter)
+                .on_input(Message::SvcFilter)
+                .padding(8),
+        ]
+        .spacing(6);
+        if let Some(change) = &self.svc_confirm {
+            col = col.push(
+                container(
+                    column![
+                        text(format!(
+                            "{}? Users and programs relying on it may be interrupted.",
+                            change.describe()
+                        )),
+                        row![
+                            button(text("Confirm"))
+                                .style(button::danger)
+                                .on_press(Message::SvcConfirm),
+                            button(text("Cancel"))
+                                .style(button::secondary)
+                                .on_press(Message::SvcCancel),
+                        ]
+                        .spacing(8),
+                    ]
+                    .spacing(8),
+                )
+                .padding(10)
+                .width(Length::Fill)
+                .style(container::bordered_box),
+            );
+        }
+        if self.svc_busy {
+            col = col.push(
+                text("Working on the agent…")
+                    .size(13)
+                    .style(text::secondary),
+            );
+        }
+        if let Some(n) = &self.svc_notice {
+            col = col.push(match n {
+                Ok(m) => text(m.clone()).size(13).style(text::success),
+                Err(e) => text(e.clone()).size(13).style(text::danger),
+            });
+        }
+        col.push(container(header).style(container::rounded_box))
+            .push(scrollable(column(rows).spacing(4)).height(Length::Fill))
+            .push(
+                text(format!("{} of {} services", shown.len(), list.len()))
+                    .size(12)
+                    .style(text::secondary),
+            )
+            .into()
     }
 
     fn procs_view(&self) -> Element<'_, Message> {

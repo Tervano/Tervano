@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.3";
+pub const PROTOCOL_VERSION: &str = "1.4";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -183,6 +183,57 @@ pub struct ProcessInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KillRequest {
     pub name: String,
+}
+
+/// One Windows service as reported by an agent (`GET /v1/services` on the direct channel).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServiceEntry {
+    /// Key name, e.g. `Spooler`.
+    pub name: String,
+    pub display_name: String,
+    /// "running", "stopped", "paused", "start_pending", "stop_pending", "pause_pending", "continue_pending".
+    pub state: String,
+    pub pid: Option<u32>,
+    /// `None` when the agent could not read the service's configuration.
+    pub start_type: Option<StartType>,
+    pub account: Option<String>,
+    pub executable: Option<String>,
+    pub dependencies: Vec<String>,
+    pub can_stop: bool,
+    pub can_pause: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartType {
+    Automatic,
+    Manual,
+    Disabled,
+    /// Driver start types; reported, never set.
+    Boot,
+    System,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAction {
+    Start,
+    Stop,
+    Pause,
+    Resume,
+    Restart,
+}
+
+/// Body of `POST /v1/services/{name}/control`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceControlRequest {
+    pub action: ServiceAction,
+}
+
+/// Body of `POST /v1/services/{name}/start-type`. Only automatic, manual and disabled are accepted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartTypeRequest {
+    pub start_type: StartType,
 }
 
 /// SSE event names on `GET /api/v1/stream`.
