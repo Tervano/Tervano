@@ -26,7 +26,7 @@ flowchart LR
 
 **Why the server is optional:** it accelerates discovery and centralizes policy; direct Console→Agent device reads already work during a server outage. Further direct operations are planned.
 
-Architecture decisions: [Iced Console](docs/adr/0001-iced-console.md), [SQLite first](docs/adr/0002-sqlite-first.md), and [HTTP+JSON for Phase 1](docs/adr/0003-http-json-phase1.md).
+Current [architecture](docs/architecture.md) and [network protocol](docs/network-protocol.md) are documented alongside the decisions for [Iced](docs/adr/0001-iced-console.md), [SQLite](docs/adr/0002-sqlite-first.md), and [HTTP+JSON](docs/adr/0003-http-json-phase1.md).
 
 ## Feature status
 
@@ -37,7 +37,8 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Agent | Background service | Partial | Windows | SCM install/run implemented ([service.rs](apps/agent/src/service.rs)); foreground mode verified on Win 11 25H2; service mode not yet verified end-to-end |
 | Agent | Secure enrollment | Partial | Windows | One-time/N-use expiring tokens over TLS; device secret DPAPI-protected on the agent. Mutual TLS device identity is T-808 |
 | Server | TLS | Implemented | Win/Linux | rustls; plaintext only on loopback. `tervano-server cert init` creates a private CA + server cert |
-| Server | Audit log | Partial | Win/Linux | Append-only (DB triggers); enrollments, auth failures, token/technician creation. `GET /api/v1/audit` includes socket peer IP for HTTP events; behind a proxy this is the proxy IP |
+| Server | Audit log | Partial | Win/Linux | Append-only (DB triggers); enrollments, auth failures, token/technician creation and lifecycle. `GET /api/v1/audit` includes socket peer IP for HTTP events; behind a proxy this is the proxy IP |
+| Server | Technician API tokens | Partial | Win/Linux | New tokens expire after 30 days by default; `tech rotate` replaces the old token and `tech revoke` disables it. CLI management only; RBAC and direct-channel certificate lifecycle remain separate work |
 | Agent | Report hostname, OS, IPs, signed-in users | Implemented | Windows | Verified on Windows 11 Home 25H2 (build 26200), workgroup machine. Not yet tested domain-joined |
 | Agent | Change detection | Partial | Windows | Poll-and-diff every `poll_secs`; event-driven notifications are T-209/T-210 |
 | Server | Device index + search | Implemented | Win/Linux | Prefix search by hostname, username, `DOMAIN\user`, IP. Tests: [api.rs](apps/server/tests/api.rs). Not yet benchmarked (T-112) |
@@ -48,8 +49,8 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Discovery | Find computers by logged-in user | Implemented | Windows | From real agent session data, not AD attributes |
 | Console | Search, device list, device details | Implemented | Windows | Loading / empty / error states |
 | Console | Live device updates | Implemented | Windows | Server push (SSE): logons, IP changes, online/offline appear within seconds; falls back to 15 s polling when the stream is down |
-| Agent | Direct (serverless) management listener | Partial | Windows | mTLS: technician client certs from the org CA, per-technician allowlist, agent cert pinned by fingerprint. Only device info is exposed so far |
-| Console | Serverless mode (Direct page) | Implemented | Windows | Add agents by address, confirm their certificate fingerprint on first contact, then view live device info over mutual TLS. Pin changes are refused with a warning |
+| Agent | Direct (serverless) management listener | Partial | Windows | mTLS: technician client certs from the org CA, per-technician allowlist, agent cert pinned by fingerprint. Device, process, service, event-log, and hardware reads work; process/service changes require `operators` (elevated service changes remain unverified) |
+| Console | Serverless mode (Direct page) | Implemented | Windows | Add agents by address, confirm their certificate fingerprint on first contact, then use device, process, service, event-log, and hardware views over mutual TLS. Pin changes are refused with a warning |
 | Directory | Active Directory browsing | Planned | Windows | T-600+ |
 | Remote | Screen viewing / remote input / user notification | Planned | Windows | T-500+ |
 | Inventory | Software inventory | Implemented | Windows | Direct channel and `TervanoAgent software`: installed apps (machine 64/32-bit and signed-in users), versions, publishers, sizes; pending-restart detection |
@@ -88,7 +89,7 @@ cargo build --workspace
 ```bash
 mkdir -p dev-data && cd dev-data
 ../target/debug/tervano-server token create     # prints an enrollment token
-../target/debug/tervano-server tech create --name alice   # prints a technician token
+../target/debug/tervano-server tech create --name alice   # prints a 30-day technician token
 ../target/debug/tervano-server serve            # http://127.0.0.1:8470 (plaintext is loopback-only)
 ```
 
@@ -98,7 +99,7 @@ Create `dev-data/agent.toml` from [agent.example.toml](apps/agent/agent.example.
 ../target/debug/TervanoAgent run agent.toml
 ```
 
-Run `target/debug/TervanoConsole`, paste the technician token in Settings, and search.
+Run `target/debug/TervanoConsole`, paste the technician token in Settings, and search. Rotate or revoke technician API tokens with `tervano-server tech rotate --name alice` or `tervano-server tech revoke --name alice` against the same database; rotation prints a replacement token once. Existing tokens receive a 30-day grace period when the lifecycle migration first runs. See [Server deployment](docs/server-deployment.md).
 
 **Server metrics:** `GET /metrics` uses Prometheus text format and requires a
 technician bearer token. For example, from the machine running the Server:
@@ -131,11 +132,11 @@ Installers (MSI) and Linux/container server packaging are planned (T-950–T-952
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) to get started, [AGENTS.md](AGENTS.md) for layout and required gates, and [TASKS.md](TASKS.md) for task ownership. The [Code of Conduct](CODE_OF_CONDUCT.md) applies to project spaces. Generate the [third-party license inventory](THIRD_PARTY_LICENSES.md) from Cargo.lock after dependency changes.
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [development notes](docs/development.md) to get started, [AGENTS.md](AGENTS.md) for required gates, and [TASKS.md](TASKS.md) for task ownership. The [Code of Conduct](CODE_OF_CONDUCT.md) applies to project spaces. Generate the [third-party license inventory](THIRD_PARTY_LICENSES.md) from Cargo.lock after dependency changes.
 
 ## Roadmap
 
-Phases from [PLAN.md](PLAN.md) §16, tracked in detail in [TASKS.md](TASKS.md):
+Phases from [PLAN.md](PLAN.md) §16, summarized in [docs/roadmap.md](docs/roadmap.md) and tracked in detail in [TASKS.md](TASKS.md):
 
 - [x] Phase 0 — workspace, protocol, config, migrations (CI and docs still open)
 - [ ] Phase 1 — Agent → Server → Console slice (core, TLS, audit, DPAPI, live updates, serverless direct management done)
@@ -148,7 +149,7 @@ Phases from [PLAN.md](PLAN.md) §16, tracked in detail in [TASKS.md](TASKS.md):
 
 ## Security & privacy
 
-Intended model (PLAN §12): mutual authentication, TLS everywhere, per-operation authorization enforced on the agent, append-only audit, mandatory visible notification for any interactive remote session, classroom recording off by default. **Today** the Server uses TLS off loopback, bearer-token authentication, hashed secrets, and a limited append-only audit log. The Windows Agent protects its device secret with DPAPI; direct Console→Agent connections use mutual TLS and a pinned Agent certificate. Role-based access and mutual TLS device identity to the Server remain planned. See the [current security model](docs/security-model.md) for trust boundaries and known gaps. Report vulnerabilities through the private path in [SECURITY.md](SECURITY.md).
+Intended model (PLAN §12): mutual authentication, TLS everywhere, per-operation authorization enforced on the agent, append-only audit, mandatory visible notification for any interactive remote session, classroom recording off by default. **Today** the Server uses TLS off loopback, bearer-token authentication, hashed secrets, and a limited append-only audit log. The Windows Agent protects its device secret with DPAPI; direct Console→Agent connections use mutual TLS and a pinned Agent certificate. Full role- and endpoint-scoped access and mutual TLS device identity to the Server remain planned. See the [current security model](docs/security-model.md) for trust boundaries and known gaps. Report vulnerabilities through the private path in [SECURITY.md](SECURITY.md).
 
 ## License
 

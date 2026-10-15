@@ -216,17 +216,111 @@ pub async fn create_enrollment_token(
     Ok(token)
 }
 
-/// Creates a technician API token. Returns the plaintext token.
+pub const DEFAULT_TECH_TOKEN_HOURS: u64 = 30 * 24;
+pub const MAX_TECH_TOKEN_HOURS: u64 = 90 * 24;
+
+fn technician_expiry(valid_for: Duration) -> anyhow::Result<i64> {
+    let millis = i64::try_from(valid_for.as_millis())?;
+    let max_millis = i64::try_from(MAX_TECH_TOKEN_HOURS)? * 3_600_000;
+    anyhow::ensure!(
+        (3_600_000..=max_millis).contains(&millis),
+        "technician token lifetime must be between 1 hour and 90 days"
+    );
+    now_millis()
+        .checked_add(millis)
+        .ok_or_else(|| anyhow::anyhow!("technician token expiry exceeds timestamp range"))
+}
+
+fn validate_technician_name(name: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !name.trim().is_empty() && name.len() <= 128 && !name.chars().any(char::is_control),
+        "technician name must be 1-128 bytes without control characters"
+    );
+    Ok(())
+}
+
+/// Creates a technician API token valid for 30 days. Returns the plaintext token once.
 pub async fn create_technician(db: &SqlitePool, name: &str) -> anyhow::Result<String> {
+    create_technician_with_ttl(
+        db,
+        name,
+        Duration::from_secs(DEFAULT_TECH_TOKEN_HOURS * 3600),
+    )
+    .await
+}
+
+pub async fn create_technician_with_ttl(
+    db: &SqlitePool,
+    name: &str,
+    valid_for: Duration,
+) -> anyhow::Result<String> {
+    validate_technician_name(name)?;
+    let expires_at = technician_expiry(valid_for)?;
     let token = new_secret();
-    sqlx::query("INSERT INTO technicians (id, name, token_hash, created_at) VALUES (?, ?, ?, ?)")
+    sqlx::query("INSERT INTO technicians (id, name, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)")
         .bind(Uuid::new_v4().to_string())
         .bind(name)
         .bind(hash_secret(&token))
         .bind(now_millis())
+        .bind(expires_at)
         .execute(db)
         .await?;
     Ok(token)
+}
+
+/// Replaces one active or expired token. A revoked technician cannot be rotated back into service.
+pub async fn rotate_technician(
+    db: &SqlitePool,
+    name: &str,
+    valid_for: Duration,
+    actor: &str,
+) -> anyhow::Result<String> {
+    validate_technician_name(name)?;
+    let expires_at = technician_expiry(valid_for)?;
+    let token = new_secret();
+    let mut tx = db.begin().await?;
+    let changed = sqlx::query(
+        "UPDATE technicians SET token_hash = ?, expires_at = ? WHERE name = ? AND revoked_at IS NULL",
+    )
+    .bind(hash_secret(&token))
+    .bind(expires_at)
+    .bind(name)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    anyhow::ensure!(changed == 1, "technician not found or revoked");
+    sqlx::query("INSERT INTO audit_log (at, actor, action, target, ok, detail) VALUES (?, ?, 'technician.rotate', ?, 1, ?)")
+        .bind(now_millis())
+        .bind(actor)
+        .bind(name)
+        .bind(format!("expires_at={expires_at}"))
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(token)
+}
+
+/// Invalidates a technician token. The audit row and revocation commit together.
+pub async fn revoke_technician(db: &SqlitePool, name: &str, actor: &str) -> anyhow::Result<()> {
+    validate_technician_name(name)?;
+    let now = now_millis();
+    let mut tx = db.begin().await?;
+    let changed =
+        sqlx::query("UPDATE technicians SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL")
+            .bind(now)
+            .bind(name)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    anyhow::ensure!(changed == 1, "technician not found or already revoked");
+    sqlx::query("INSERT INTO audit_log (at, actor, action, target, ok, detail) VALUES (?, ?, 'technician.revoke', ?, 1, '')")
+        .bind(now)
+        .bind(actor)
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 pub fn app(state: AppState) -> Router {
@@ -374,6 +468,17 @@ impl FromRequestParts<AppState> for DeviceAuth {
 /// An authenticated technician.
 pub struct TechAuth {
     pub name: String,
+    token_hash: String,
+}
+
+async fn technician_token_active(db: &SqlitePool, token_hash: &str) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM technicians WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?)",
+    )
+    .bind(token_hash)
+    .bind(now_millis())
+    .fetch_one(db)
+    .await
 }
 
 impl FromRequestParts<AppState> for TechAuth {
@@ -382,13 +487,16 @@ impl FromRequestParts<AppState> for TechAuth {
         let unauthorized =
             || AppError::new(err(StatusCode::UNAUTHORIZED, "invalid technician token"));
         let token = bearer(parts).ok_or_else(unauthorized)?;
-        let name: Option<String> =
-            sqlx::query_scalar("SELECT name FROM technicians WHERE token_hash = ?")
-                .bind(hash_secret(token))
-                .fetch_optional(&s.db)
-                .await?;
+        let token_hash = hash_secret(token);
+        let name: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM technicians WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?",
+        )
+        .bind(&token_hash)
+        .bind(now_millis())
+        .fetch_optional(&s.db)
+        .await?;
         match name {
-            Some(name) => Ok(TechAuth { name }),
+            Some(name) => Ok(TechAuth { name, token_hash }),
             None => {
                 let client_ip = parts
                     .extensions
@@ -400,7 +508,7 @@ impl FromRequestParts<AppState> for TechAuth {
                     "technician.auth",
                     "",
                     false,
-                    "unknown token",
+                    "invalid, expired, or revoked token",
                     client_ip,
                 )
                 .await;
@@ -710,21 +818,49 @@ fn primary_ip(addrs: &[NetAddress]) -> Option<String> {
 // shortcut: every technician sees every device id; scope by RBAC once it exists (T-806).
 async fn stream_changes(
     State(s): State<AppState>,
-    _tech: TechAuth,
+    tech: TechAuth,
 ) -> axum::response::sse::Sse<
     impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
 > {
     use axum::response::sse::{Event, KeepAlive, Sse};
-    use tokio_stream::{StreamExt, wrappers::BroadcastStream};
-    let events = BroadcastStream::new(s.changes.subscribe()).map(|r| {
-        Ok(match r {
-            Ok(id) => Event::default()
-                .event(STREAM_DEVICE)
-                .data(serde_json::to_string(&DeviceChanged { id }).expect("serializes")),
-            Err(_lagged) => Event::default().event(STREAM_RESYNC).data("{}"),
-        })
+    use tokio_stream::wrappers::ReceiverStream;
+    let (sender, receiver) =
+        tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(16);
+    tokio::spawn(async move {
+        let mut changes = s.changes.subscribe();
+        let mut recheck = tokio::time::interval(Duration::from_secs(15));
+        loop {
+            let outgoing = tokio::select! {
+                _ = recheck.tick() => None,
+                result = changes.recv() => match result {
+                    Ok(id) => Some(Event::default()
+                        .event(STREAM_DEVICE)
+                        .data(serde_json::to_string(&DeviceChanged { id }).expect("serializes"))),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        Some(Event::default().event(STREAM_RESYNC).data("{}"))
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
+            };
+            if sender.is_closed() {
+                break;
+            }
+            match technician_token_active(&s.db, &tech.token_hash).await {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(e) => {
+                    tracing::warn!("SSE token recheck failed: {e}");
+                    break;
+                }
+            }
+            if let Some(event) = outgoing
+                && sender.send(Ok(event)).await.is_err()
+            {
+                break;
+            }
+        }
     });
-    Sse::new(events).keep_alive(KeepAlive::default())
+    Sse::new(ReceiverStream::new(receiver)).keep_alive(KeepAlive::default())
 }
 
 #[derive(Deserialize)]

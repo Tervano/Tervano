@@ -3,7 +3,8 @@ mod cert;
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, time::Duration};
 use tervano_server::{
-    AppState, Config, app, audit, connect, create_enrollment_token, create_technician,
+    AppState, Config, DEFAULT_TECH_TOKEN_HOURS, MAX_TECH_TOKEN_HOURS, app, audit, connect,
+    create_enrollment_token, create_technician_with_ttl, revoke_technician, rotate_technician,
     spawn_event_purger, spawn_offline_sweeper,
 };
 
@@ -55,6 +56,21 @@ enum TechCmd {
     Create {
         #[arg(long)]
         name: String,
+        /// Lifetime in hours (default 30 days, maximum 90 days).
+        #[arg(long, default_value_t = DEFAULT_TECH_TOKEN_HOURS)]
+        hours: u64,
+    },
+    /// Replace an active or expired token and print the replacement once.
+    Rotate {
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value_t = DEFAULT_TECH_TOKEN_HOURS)]
+        hours: u64,
+    },
+    /// Disable a technician API token. A revoked name cannot be rotated.
+    Revoke {
+        #[arg(long)]
+        name: String,
     },
 }
 
@@ -85,6 +101,14 @@ fn load_config(path: &PathBuf) -> anyhow::Result<Config> {
     };
     cfg.validate()?;
     Ok(cfg)
+}
+
+fn tech_token_duration(hours: u64) -> anyhow::Result<Duration> {
+    anyhow::ensure!(
+        (1..=MAX_TECH_TOKEN_HOURS).contains(&hours),
+        "technician token hours must be 1-{MAX_TECH_TOKEN_HOURS}"
+    );
+    Ok(Duration::from_secs(hours * 3600))
 }
 
 /// The OS user running a CLI command, for audit attribution.
@@ -168,20 +192,33 @@ async fn main() -> anyhow::Result<()> {
             println!("{token}");
         }
         Cmd::Tech {
-            cmd: TechCmd::Create { name },
+            cmd: TechCmd::Create { name, hours },
         } => {
-            let token = create_technician(&db, &name).await?;
+            let token = create_technician_with_ttl(&db, &name, tech_token_duration(hours)?).await?;
             audit(
                 &db,
                 &cli_actor(),
                 "technician.create",
                 &name,
                 true,
-                "",
+                &format!("hours={hours}"),
                 None,
             )
             .await;
             println!("{token}");
+        }
+        Cmd::Tech {
+            cmd: TechCmd::Rotate { name, hours },
+        } => {
+            let token =
+                rotate_technician(&db, &name, tech_token_duration(hours)?, &cli_actor()).await?;
+            println!("{token}");
+        }
+        Cmd::Tech {
+            cmd: TechCmd::Revoke { name },
+        } => {
+            revoke_technician(&db, &name, &cli_actor()).await?;
+            println!("revoked {name}");
         }
         Cmd::Cert { .. } => unreachable!("handled above"),
     }
