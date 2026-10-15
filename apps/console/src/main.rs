@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod api;
+mod direct;
 
 use iced::widget::{Space, button, column, container, row, rule, scrollable, text, text_input};
 use iced::{Alignment, Color, Element, Length, Subscription, Task, Theme};
@@ -32,6 +33,20 @@ struct Settings {
     /// Optional PEM CA to trust for the server (e.g. `ca.pem` from `tervano-server cert init`).
     ca_cert: String,
     dark: bool,
+    /// Technician client certificate + key (PEM paths) for direct agent connections.
+    // shortcut: key file is plaintext on disk; move to the Windows certificate store with T-306.
+    tech_cert: String,
+    tech_key: String,
+    /// Agents managed directly (serverless), each pinned to its certificate fingerprint.
+    endpoints: Vec<Endpoint>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+struct Endpoint {
+    /// `host:port`.
+    address: String,
+    /// SHA-256 of the agent's certificate, lowercase hex.
+    fingerprint: String,
 }
 
 impl Settings {
@@ -64,6 +79,7 @@ impl Settings {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Page {
     Devices,
+    Direct,
     Settings,
 }
 
@@ -82,6 +98,23 @@ enum Message {
     SaveSettings,
     ToggleTheme,
     Live(api::LiveEvent),
+    TechCertChanged(String),
+    TechKeyChanged(String),
+    DirectInput(String),
+    DirectAdd,
+    DirectProbed(String, Result<String, String>),
+    DirectTrust,
+    DirectCancel,
+    DirectSelect(String),
+    DirectLoaded(String, Result<DeviceState, String>),
+    DirectRemove(String),
+}
+
+/// An agent awaiting the technician's trust decision.
+struct PendingTrust {
+    address: String,
+    /// `None` while probing.
+    fingerprint: Option<Result<String, String>>,
 }
 
 struct Console {
@@ -100,21 +133,30 @@ struct Console {
     live: bool,
     /// A pushed change arrived; refresh once the debounce tick fires.
     dirty: bool,
+    direct_input: String,
+    direct_notice: Option<String>,
+    pending_trust: Option<PendingTrust>,
+    direct_selected: Option<String>,
+    /// Last result per endpoint address, for status dots and the details panel.
+    direct_results: std::collections::HashMap<String, Result<DeviceState, String>>,
 }
 
 impl Console {
     fn boot() -> (Self, Task<Message>) {
         let settings = Settings::load();
         let configured = !settings.token.is_empty();
+        let page = if configured {
+            Page::Devices
+        } else if !settings.endpoints.is_empty() {
+            Page::Direct
+        } else {
+            Page::Settings
+        };
         let mut c = Console {
             draft: settings.clone(),
             settings,
             settings_status: None,
-            page: if configured {
-                Page::Devices
-            } else {
-                Page::Settings
-            },
+            page,
             query: String::new(),
             search_gen: 0,
             loading: false,
@@ -123,6 +165,11 @@ impl Console {
             details: None,
             live: false,
             dirty: false,
+            direct_input: String::new(),
+            direct_notice: None,
+            pending_trust: None,
+            direct_selected: None,
+            direct_results: Default::default(),
         };
         let task = if configured { c.search() } else { Task::none() };
         (c, task)
@@ -151,6 +198,34 @@ impl Console {
             async move { client?.details(id).await },
             Message::DetailsDone,
         )
+    }
+
+    fn creds(&self) -> direct::Creds {
+        direct::Creds {
+            cert: self.settings.tech_cert.clone(),
+            key: self.settings.tech_key.clone(),
+        }
+    }
+
+    fn load_direct(&self, address: &str) -> Task<Message> {
+        let Some(ep) = self
+            .settings
+            .endpoints
+            .iter()
+            .find(|e| e.address == address)
+        else {
+            return Task::none();
+        };
+        let (addr, pin, creds) = (ep.address.clone(), ep.fingerprint.clone(), self.creds());
+        Task::perform(direct::device(addr.clone(), pin, creds), move |r| {
+            Message::DirectLoaded(addr.clone(), r)
+        })
+    }
+
+    fn save_settings(&mut self) {
+        if let Err(e) = self.settings.save() {
+            self.direct_notice = Some(format!("Could not save settings: {e}"));
+        }
     }
 
     fn update(&mut self, msg: Message) -> Task<Message> {
@@ -197,10 +272,80 @@ impl Console {
                     .to_owned();
                 self.draft.token = self.draft.token.trim().to_owned();
                 self.draft.ca_cert = self.draft.ca_cert.trim().trim_matches('"').to_owned();
+                self.draft.tech_cert = self.draft.tech_cert.trim().trim_matches('"').to_owned();
+                self.draft.tech_key = self.draft.tech_key.trim().trim_matches('"').to_owned();
+                // Endpoints are edited on the Direct page, not via the draft.
+                self.draft.endpoints = self.settings.endpoints.clone();
                 self.settings = self.draft.clone();
                 self.settings_status = Some(self.settings.save().map(|_| "Saved.".into()));
-                self.page = Page::Devices;
-                return self.search();
+                if self.settings.token.is_empty() {
+                    self.page = Page::Direct;
+                } else {
+                    self.page = Page::Devices;
+                    return self.search();
+                }
+            }
+            Message::TechCertChanged(s) => self.draft.tech_cert = s,
+            Message::TechKeyChanged(s) => self.draft.tech_key = s,
+            Message::DirectInput(s) => self.direct_input = s,
+            Message::DirectAdd => {
+                let address = direct::normalize_address(&self.direct_input);
+                if self.direct_input.trim().is_empty() {
+                    return Task::none();
+                }
+                if self.settings.endpoints.iter().any(|e| e.address == address) {
+                    self.direct_notice = Some(format!("{address} is already in the list."));
+                    return Task::none();
+                }
+                self.direct_notice = None;
+                self.pending_trust = Some(PendingTrust {
+                    address: address.clone(),
+                    fingerprint: None,
+                });
+                return Task::perform(direct::probe(address.clone(), self.creds()), move |r| {
+                    Message::DirectProbed(address.clone(), r)
+                });
+            }
+            Message::DirectProbed(address, r) => {
+                if let Some(p) = &mut self.pending_trust
+                    && p.address == address
+                {
+                    p.fingerprint = Some(r);
+                }
+            }
+            Message::DirectTrust => {
+                if let Some(PendingTrust {
+                    address,
+                    fingerprint: Some(Ok(fp)),
+                }) = self.pending_trust.take()
+                {
+                    self.settings.endpoints.push(Endpoint {
+                        address: address.clone(),
+                        fingerprint: direct::normalize_fingerprint(&fp),
+                    });
+                    self.draft.endpoints = self.settings.endpoints.clone();
+                    self.save_settings();
+                    self.direct_input.clear();
+                    self.direct_selected = Some(address.clone());
+                    return self.load_direct(&address);
+                }
+            }
+            Message::DirectCancel => self.pending_trust = None,
+            Message::DirectSelect(address) => {
+                self.direct_selected = Some(address.clone());
+                return self.load_direct(&address);
+            }
+            Message::DirectLoaded(address, r) => {
+                self.direct_results.insert(address, r);
+            }
+            Message::DirectRemove(address) => {
+                self.settings.endpoints.retain(|e| e.address != address);
+                self.draft.endpoints = self.settings.endpoints.clone();
+                self.direct_results.remove(&address);
+                if self.direct_selected.as_deref() == Some(address.as_str()) {
+                    self.direct_selected = None;
+                }
+                self.save_settings();
             }
             Message::Live(ev) => match ev {
                 api::LiveEvent::Connected => {
@@ -230,15 +375,28 @@ impl Console {
     }
 
     fn subscription(&self) -> Subscription<Message> {
+        // Direct agents have no push channel; refresh the one being viewed.
+        let direct_tick = match (&self.page, &self.direct_selected) {
+            (Page::Direct, Some(addr)) => {
+                let addr = addr.clone();
+                iced::time::every(Duration::from_secs(15))
+                    .with(addr)
+                    .map(|(addr, _)| Message::DirectSelect(addr))
+            }
+            _ => Subscription::none(),
+        };
         if self.settings.token.is_empty() {
-            return Subscription::none();
+            return direct_tick;
         }
         let key = (
             self.settings.server_url.clone(),
             self.settings.token.clone(),
             self.settings.ca_cert.clone(),
         );
-        let mut subs = vec![Subscription::run_with(key, api::live).map(Message::Live)];
+        let mut subs = vec![
+            Subscription::run_with(key, api::live).map(Message::Live),
+            direct_tick,
+        ];
         if self.dirty {
             // Debounce: a burst of pushed changes becomes one refresh.
             // shortcut: re-runs the whole current search per burst; patch rows in place if this gets heavy (T-307).
@@ -276,6 +434,7 @@ impl Console {
                 text("Console").size(12).style(text::secondary),
                 Space::new().height(16),
                 nav("Devices", Page::Devices),
+                nav("Direct", Page::Direct),
                 nav("Settings", Page::Settings),
                 Space::new().height(Length::Fill),
                 button(
@@ -299,6 +458,7 @@ impl Console {
 
         let main: Element<_> = match self.page {
             Page::Devices => self.devices_view(),
+            Page::Direct => self.direct_view(),
             Page::Settings => self.settings_view(),
         };
         row![
@@ -422,70 +582,124 @@ impl Console {
             Some(Err(e)) => return error_box(e),
             Some(Ok(d)) => d,
         };
-        let s = &d.state;
-        let kv = |k: &'a str, v: String| {
-            row![text(k).width(120).style(text::secondary), text(v)].spacing(8)
-        };
-        let section = |title: &'a str| text(title).size(13).style(text::primary);
-
-        let mut sessions = column![section("Active users")].spacing(4);
-        if s.sessions.is_empty() {
-            sessions = sessions.push(text("No one is signed in.").style(text::secondary));
-        }
-        for u in &s.sessions {
-            let state = match u.state {
-                SessionState::Active => "active",
-                SessionState::Disconnected => "disconnected",
-                SessionState::Other => "other",
-            };
-            sessions = sessions.push(text(format!(
-                "{}\\{}  ·  {}  ·  {state}",
-                u.domain, u.username, u.station
-            )));
-        }
-
-        let mut net = column![section("Network")].spacing(4);
-        for a in &s.addresses {
-            net = net.push(
-                row![
-                    text(&a.interface).width(120).style(text::secondary),
-                    text(&a.address)
-                ]
-                .spacing(8),
-            );
-        }
-
-        scrollable(
-            column![
-                row![status_dot(d.online), text(&s.hostname).size(22)]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                text(if d.online { "Online" } else { "Offline" })
-                    .size(12)
-                    .style(text::secondary),
-                rule::horizontal(1),
-                section("Summary"),
-                kv(
-                    "Domain",
-                    s.domain.clone().unwrap_or_else(|| "Workgroup".into())
-                ),
-                kv("OS", s.os.name.clone()),
-                kv(
-                    "Version",
-                    format!("{} (build {})", s.os.version, s.os.build)
-                ),
-                kv("Agent", s.agent_version.clone()),
-                kv("Last seen", ago(d.last_seen)),
-                kv("Enrolled", ago(d.enrolled_at)),
-                kv("Device ID", d.id.to_string()),
-                rule::horizontal(1),
-                sessions,
-                rule::horizontal(1),
-                net,
-            ]
-            .spacing(8),
+        state_panel(
+            &d.state,
+            d.online,
+            if d.online { "Online" } else { "Offline" },
+            vec![
+                ("Last seen", ago(d.last_seen)),
+                ("Enrolled", ago(d.enrolled_at)),
+                ("Device ID", d.id.to_string()),
+            ],
         )
-        .into()
+    }
+
+    fn direct_view(&self) -> Element<'_, Message> {
+        let add = row![
+            text_input(
+                "Agent address, e.g. pc-lab-01.corp.example or 10.0.0.5:8472",
+                &self.direct_input
+            )
+            .on_input(Message::DirectInput)
+            .on_submit(Message::DirectAdd)
+            .padding(10)
+            .size(15),
+            button(text("Add agent"))
+                .padding([10, 16])
+                .style(button::primary)
+                .on_press(Message::DirectAdd),
+        ]
+        .spacing(8);
+        let mut top = column![
+            add,
+            text("Direct connections go straight to the agent with your technician certificate; no server is involved.")
+                .size(12)
+                .style(text::secondary),
+        ]
+        .spacing(6);
+        if let Some(n) = &self.direct_notice {
+            top = top.push(text(n).size(13).style(text::danger));
+        }
+        if let Some(p) = &self.pending_trust {
+            top = top.push(trust_panel(p));
+        }
+
+        let list: Element<_> = if self.settings.endpoints.is_empty() {
+            centered(
+                "No agents yet. Add one by address; you'll confirm its certificate fingerprint before anything is exchanged.",
+            )
+        } else {
+            let rows = self.settings.endpoints.iter().map(|e| {
+                let result = self.direct_results.get(&e.address);
+                let (online, label) = match result {
+                    Some(Ok(s)) => (true, s.hostname.clone()),
+                    Some(Err(_)) => (false, "unreachable or refused".into()),
+                    None => (false, "not checked yet".into()),
+                };
+                let selected = self.direct_selected.as_deref() == Some(e.address.as_str());
+                row![
+                    button(
+                        row![
+                            status_dot(online),
+                            text(&e.address).width(Length::FillPortion(3)),
+                            text(label).width(Length::FillPortion(3)),
+                            text(direct::display_fingerprint(
+                                &e.fingerprint[..16.min(e.fingerprint.len())]
+                            ))
+                            .size(12)
+                            .style(text::secondary)
+                            .width(Length::FillPortion(2)),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    )
+                    .padding([8, 10])
+                    .width(Length::Fill)
+                    .style(if selected {
+                        button::secondary
+                    } else {
+                        button::text
+                    })
+                    .on_press(Message::DirectSelect(e.address.clone())),
+                    button(text("Remove").size(12))
+                        .style(button::subtle)
+                        .on_press(Message::DirectRemove(e.address.clone())),
+                ]
+                .spacing(4)
+                .align_y(Alignment::Center)
+                .into()
+            });
+            scrollable(column(rows).spacing(2))
+                .height(Length::Fill)
+                .into()
+        };
+
+        let content: Element<_> = match self
+            .direct_selected
+            .as_ref()
+            .map(|a| (a, self.direct_results.get(a)))
+        {
+            None => list,
+            Some((_, result)) => {
+                let panel = match result {
+                    None => centered("Connecting…"),
+                    Some(Err(e)) => error_box(e),
+                    Some(Ok(s)) => {
+                        state_panel(s, true, "Reachable directly · live from the agent", vec![])
+                    }
+                };
+                row![
+                    container(list).width(Length::FillPortion(3)),
+                    rule::vertical(1),
+                    container(panel)
+                        .width(Length::FillPortion(2))
+                        .padding([0, 8]),
+                ]
+                .spacing(12)
+                .into()
+            }
+        };
+        column![top, content].spacing(12).into()
     }
 
     fn settings_view(&self) -> Element<'_, Message> {
@@ -512,7 +726,22 @@ impl Console {
             .on_input(Message::CaCertChanged)
             .on_submit(Message::SaveSettings)
             .padding(10),
-            button(text("Save and connect"))
+            Space::new().height(8),
+            text("Direct connections (serverless)").size(15),
+            text("Technician certificate").size(13),
+            text_input(
+                "Path to tech-<you>.pem from `tervano-server cert tech --name <you>`",
+                &self.draft.tech_cert
+            )
+            .on_input(Message::TechCertChanged)
+            .on_submit(Message::SaveSettings)
+            .padding(10),
+            text("Technician key").size(13),
+            text_input("Path to tech-<you>-key.pem", &self.draft.tech_key)
+                .on_input(Message::TechKeyChanged)
+                .on_submit(Message::SaveSettings)
+                .padding(10),
+            button(text("Save"))
                 .padding([10, 16])
                 .style(button::primary)
                 .on_press(Message::SaveSettings),
@@ -527,6 +756,111 @@ impl Console {
         }
         col.into()
     }
+}
+
+fn trust_panel(p: &PendingTrust) -> Element<'_, Message> {
+    let body: Element<_> = match &p.fingerprint {
+        None => text(format!("Contacting {}…", p.address)).into(),
+        Some(Err(e)) => column![
+            text(e.clone()).style(text::danger),
+            button(text("Dismiss")).style(button::secondary).on_press(Message::DirectCancel),
+        ]
+        .spacing(8)
+        .into(),
+        Some(Ok(fp)) => column![
+            text(format!("{} presents this certificate fingerprint:", p.address)),
+            text(direct::display_fingerprint(fp)).size(15).font(iced::Font::MONOSPACE),
+            text("Before trusting it, compare with the output of `TervanoAgent direct-fingerprint` on that computer. A mismatch means you may be talking to something else.")
+                .size(12)
+                .style(text::secondary),
+            row![
+                button(text("Trust and add")).style(button::primary).on_press(Message::DirectTrust),
+                button(text("Cancel")).style(button::secondary).on_press(Message::DirectCancel),
+            ]
+            .spacing(8),
+        ]
+        .spacing(8)
+        .into(),
+    };
+    container(body)
+        .padding(12)
+        .width(Length::Fill)
+        .style(container::bordered_box)
+        .into()
+}
+
+/// Device summary, sessions and network, shared by server-backed and direct views.
+fn state_panel<'a>(
+    s: &'a DeviceState,
+    online: bool,
+    status: &'a str,
+    extra: Vec<(&'a str, String)>,
+) -> Element<'a, Message> {
+    let kv =
+        |k: &'a str, v: String| row![text(k).width(120).style(text::secondary), text(v)].spacing(8);
+    let section = |title: &'a str| text(title).size(13).style(text::primary);
+
+    let mut sessions = column![section("Active users")].spacing(4);
+    if s.sessions.is_empty() {
+        sessions = sessions.push(text("No one is signed in.").style(text::secondary));
+    }
+    for u in &s.sessions {
+        let state = match u.state {
+            SessionState::Active => "active",
+            SessionState::Disconnected => "disconnected",
+            SessionState::Other => "other",
+        };
+        sessions = sessions.push(text(format!(
+            "{}\\{}  ·  {}  ·  {state}",
+            u.domain, u.username, u.station
+        )));
+    }
+
+    let mut net = column![section("Network")].spacing(4);
+    for a in &s.addresses {
+        net = net.push(
+            row![
+                text(&a.interface).width(120).style(text::secondary),
+                text(&a.address)
+            ]
+            .spacing(8),
+        );
+    }
+
+    let mut summary = column![
+        section("Summary"),
+        kv(
+            "Domain",
+            s.domain.clone().unwrap_or_else(|| "Workgroup".into())
+        ),
+        kv("OS", s.os.name.clone()),
+        kv(
+            "Version",
+            format!("{} (build {})", s.os.version, s.os.build)
+        ),
+        kv("Agent", s.agent_version.clone()),
+    ]
+    .spacing(8);
+    for (k, v) in extra {
+        summary = summary.push(kv(k, v));
+    }
+
+    scrollable(
+        column![
+            row![status_dot(online), text(&s.hostname).size(22)]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            text(status).size(12).style(text::secondary),
+            rule::horizontal(1),
+            summary,
+            rule::horizontal(1),
+            sessions,
+            rule::horizontal(1),
+            net,
+        ]
+        .spacing(8),
+    )
+    .into()
 }
 
 fn status_dot<'a>(online: bool) -> Element<'a, Message> {

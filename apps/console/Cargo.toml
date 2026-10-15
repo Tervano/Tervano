@@ -18,5 +18,8 @@ tracing-subscriber.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true }
 serde_json.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+sha2 = "0.10"
+hex = "0.4"
 uuid.workspace = true
 iced = { version = "0.14", features = ["tokio"] }
