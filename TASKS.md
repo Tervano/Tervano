@@ -49,8 +49,8 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-106 | [x] | claude | Technician API tokens: `tervano-server tech create` CLI | interim auth until SSPI/OIDC (T-150) |
 | T-107 | [x] | claude | `GET /api/v1/devices?q=` search by hostname / logged-in user / IP (prefix + substring) | integration test |
 | T-108 | [x] | claude | `GET /api/v1/devices/{id}` details | |
-| T-109 | [ ] | | TLS (rustls) for server listener; refuse non-loopback plaintext unless `--insecure-dev` | §12.2 — **required before any non-dev use** |
-| T-110 | [ ] | | Append-only audit table + `GET /api/v1/audit` (enroll, token create, search by tech, device detail views) | §12 audit model |
+| T-109 | [~] | claude | TLS (rustls) for server listener; refuse non-loopback plaintext unless `--insecure-dev` | §12.2 — **required before any non-dev use** |
+| T-110 | [~] | claude | Append-only audit table + `GET /api/v1/audit` (enroll, token create, search by tech, device detail views) | §12 audit model |
 | T-111 | [ ] | | PostgreSQL backend (sqlx `postgres` feature, same migrations translated) | §13 |
 | T-112 | [ ] | | Search indexes + FTS (SQLite FTS5 / Postgres trigram) | §5. Benchmark harness (10k devices, P95) deferred with testing |
 | T-113 | [ ] | | Server push to Console (SSE or WebSocket) for live device-state updates | "visible within a few seconds" |
@@ -71,14 +71,14 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-205 | [x] | claude | Enroll with server using token; persist identity to `state.json` | |
 | T-206 | [x] | claude | Send full state on startup, full state on change (poll-diff every N s), heartbeat when idle | Seq seeded from clock, corrected by server ack. Jitter not added yet (see T-217) |
 | T-207 | [x] | claude | Retry with exponential backoff on network failure, no duplicate state | |
-| T-208 | [ ] | | Protect device secret with DPAPI (machine scope) instead of plaintext state file; ACL state dir to SYSTEM/Administrators | §12.11 |
+| T-208 | [~] | claude | Protect device secret with DPAPI (machine scope) instead of plaintext state file; ACL state dir to SYSTEM/Administrators | §12.11 |
 | T-209 | [ ] | | Event-driven session changes (WTSRegisterSessionNotification / service control `SessionChange`) instead of poll-diff | §5 agent events |
 | T-210 | [ ] | | Event-driven network changes (NotifyIpInterfaceChange) | §5 |
 | T-211 | [ ] | | Lock/unlock detection | §5 |
 | T-212 | [ ] | | Service recovery options (restart on failure) set at install | §14 |
 | T-213 | [ ] | | Bounded on-disk event queue for offline periods | §5 |
 | T-214 | [ ] | | Measure + document idle CPU/RAM (target ≤50 MB) | §14 |
-| T-215 | [ ] | | Server certificate pinning / CA bundle config (after T-109) | |
+| T-215 | [~] | claude | Server certificate pinning / CA bundle config (after T-109) | |
 | T-216 | [ ] | | Agent log rotation / Windows Event Log sink (service mode writes one unrotated `agent.log`) | |
 | T-217 | [ ] | | Heartbeat jitter + reconnect jitter to avoid thundering herd after server restart | §5 |
 
