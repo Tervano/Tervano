@@ -20,6 +20,10 @@
 
 
 
+> \*\*TESTING DEFERRED (2026-10-14):\*\* Writing automated tests, test suites, benchmarks, load-test utilities, and CI test jobs is out of scope for now. Do not add new tests or test infrastructure. Section 17 and other test-related items below are kept for reference only and will be reinstated later. Existing tests may stay but need not be extended.
+
+
+
 \---
 
 
@@ -694,7 +698,7 @@ Build the cache to scale to at least 10,000 managed endpoints initially, with a 
 
 
 
-Create benchmarks using generated directory data.
+Create benchmarks using generated directory data (deferred).
 
 
 
@@ -1964,7 +1968,7 @@ Use an initial idle memory target of approximately 50 MB or less where realistic
 
 
 
-Provide load-test utilities that simulate large directories and many enrolled Agents.
+Provide load-test utilities that simulate large directories and many enrolled Agents (deferred).
 
 
 
@@ -2076,10 +2080,6 @@ Establish GitHub Actions workflows for:
 
 \- Static analysis.
 
-\- Unit testing.
-
-\- Integration testing.
-
 \- Windows builds.
 
 \- Linux server builds.
@@ -2126,7 +2126,7 @@ Deliver:
 
 \- Configuration system.
 
-\- Build and test automation.
+\- Build automation.
 
 \- Development documentation.
 
@@ -2378,7 +2378,11 @@ Focus on:
 
 
 
-\# 17. TESTING AND ACCEPTANCE CRITERIA
+\# 17. TESTING AND ACCEPTANCE CRITERIA — DEFERRED
+
+
+
+> \*\*Deferred for now.\*\* Nothing in this section is currently required. Kept for reference until testing is reinstated.
 
 
 
@@ -3140,8 +3144,6 @@ Create and maintain:
 
 \- `docs/development.md`
 
-\- `docs/testing.md`
-
 
 
 The two agent-instruction files should establish consistent coding standards and project conventions so Claude Code, Codex, and other contributors can work on the same repository.
@@ -3188,7 +3190,7 @@ Within the permissions of the development environment:
 
 6\. Build frequently.
 
-7\. Run tests.
+7\. ~~Run tests.~~ (deferred)
 
 8\. Fix compilation errors.
 
@@ -3448,11 +3450,11 @@ Do not claim remote control is working until it has been tested on a Windows des
 
 
 
-\*\*Step 8 — Documentation and tests\*\*
+\*\*Step 8 — Documentation\*\*
 
 
 
-Produce the comprehensive README, feature matrix, pricing comparison, architecture documentation, test suite, and working developer instructions.
+Produce the comprehensive README, feature matrix, pricing comparison, architecture documentation, and working developer instructions.
 
 
 
@@ -3497,8 +3499,6 @@ Tervano's initial foundation is successful when:
 \- Technicians can search for a computer or logged-in user through cached data.
 
 \- The project supports a documented serverless deployment path.
-
-\- Automated tests cover the implemented behavior.
 
 \- The README accurately communicates the project's current state.
 
