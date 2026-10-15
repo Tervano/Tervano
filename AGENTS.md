@@ -42,8 +42,19 @@ Local end-to-end run: see README "Quick start". Put scratch DBs/configs in `dev-
 
 ## Git
 
+- **Each agent works in its own git worktree, never in another agent's checkout or the user's.** Uncommitted edits in a shared folder get swept into the other agent's commits.
+
+  | Who | Folder | Branch |
+  |---|---|---|
+  | Claude Code | `../tervano-claude` | `agent/claude` |
+  | Codex | `../tervano-codex` | `agent/codex` |
+  | User | `tervano/` (main checkout) | `main` |
+
+  Create yours once from the main checkout: `git worktree add -b agent/<you> ../tervano-<you> origin/main`.
+  Each worktree has its own `target/` (first build is a full build) and its own git-ignored `dev-data/`.
 - Trunk-based on `main`; small commits; Conventional Commit subjects (`feat(server): …`, `fix(agent): …`, `chore(tasks): …`).
-- Pull/rebase before pushing — the other agent pushes too. Never force-push `main`.
+- Land work on `main` from your branch: `git fetch origin && git rebase origin/main`, then `git push origin HEAD:main`. Never force-push `main`; your `agent/*` branch is private and needn't be pushed.
+- Stage files explicitly (`git add <paths>`), not `git add -A`.
 - Update TASKS.md (status + verification note) in the same commit as the feature. Update README status table when a user-visible feature changes.
 - Don't edit files under a crate where the other agent has an in-progress task without noting it in TASKS.md.
 
