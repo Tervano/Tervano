@@ -14,13 +14,7 @@ use tower::ServiceExt;
 
 async fn setup() -> (Router, sqlx::SqlitePool) {
     let db = connect("sqlite::memory:").await.unwrap();
-    (
-        app(AppState {
-            db: db.clone(),
-            offline_after_ms: 180_000,
-        }),
-        db,
-    )
+    (app(AppState::new(db.clone(), 180_000)), db)
 }
 
 async fn call(

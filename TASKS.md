@@ -53,7 +53,7 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-110 | [x] | claude | Append-only audit table + `GET /api/v1/audit?before=&limit=` | Logged: device.enroll (ok/denied), technician.auth failures, enrollment_token.create, technician.create (CLI actor `cli:<user>`). Searches/views not logged (read-only, polled). UPDATE/DELETE blocked by triggers (verified). Gaps: no client IP (T-119), best-effort writes, any tech can read (T-806) |
 | T-111 | [ ] | | PostgreSQL backend (sqlx `postgres` feature, same migrations translated) | §13 |
 | T-112 | [ ] | | Search indexes + FTS (SQLite FTS5 / Postgres trigram) | §5. Benchmark harness (10k devices, P95) deferred with testing |
-| T-113 | [~] | claude | Server push to Console (SSE or WebSocket) for live device-state updates | "visible within a few seconds" |
+| T-113 | [x] | claude | Server push: SSE `GET /api/v1/stream` (`device` {id} / `resync` on lag), bounded broadcast (1024), 5 s offline sweeper announces timeouts | Verified 2026-10-15 over TLS with curl: event on agent start, event ~10 s after agent killed (sweeper), `:` keep-alives every 15 s. Shortcut: all techs see all device ids until RBAC (T-806) |
 | T-114 | [ ] | | Event history table + `GET /api/v1/devices/{id}/events` | |
 | T-115 | [ ] | | Device decommission / re-enroll (revoke secret) API + CLI | §5 device identity |
 | T-116 | [ ] | | Rate limiting / body size limits / reconnect-storm backpressure | §14 |
@@ -97,7 +97,7 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-307 | [ ] | | Virtualized list for 10k+ rows; column sort/filter/select | §11 |
 | T-308 | [ ] | | Keyboard-first: Ctrl+K focus search, arrows/Enter in results, command palette | §11 |
 | T-309 | [ ] | | Recent devices, favorites, search history | §11 |
-| T-310 | [~] | claude | Live updates via T-113 | |
+| T-310 | [x] | claude | Console live updates: SSE subscription with reconnect backoff (1→30 s), 45 s dead-connection timeout, 1 s debounced refresh; 15 s polling only while disconnected; status line shows live/polling | Verified 2026-10-15: Console logged both pushes within ~1 s; server restart → reconnected in 3 s. Visual status text not checked by eye. Shortcut: refresh re-runs whole search (T-307) |
 | T-311 | [ ] | | Serverless mode: manual endpoint list + direct agent query (needs T-400) | §2A, §22 |
 | T-312 | [ ] | | Tabs / multi-window device admin | §11 |
 | T-313 | [ ] | | Real screenshots into README | §19H |

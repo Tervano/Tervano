@@ -1,5 +1,6 @@
 //! Tervano Server API client. Errors are strings because they go straight to the UI.
 
+use iced::futures::{SinkExt, Stream, channel::mpsc};
 use std::time::Duration;
 use tervano_protocol::*;
 
@@ -12,6 +13,16 @@ pub struct Client {
 
 impl Client {
     pub fn new(base: &str, token: &str, ca_cert: &str) -> Result<Self, String> {
+        Self::build(base, token, ca_cert, Some(Duration::from_secs(10)))
+    }
+
+    /// `timeout` bounds a whole request; `None` for long-lived streams.
+    fn build(
+        base: &str,
+        token: &str,
+        ca_cert: &str,
+        timeout: Option<Duration>,
+    ) -> Result<Self, String> {
         if !url_transport_ok(base) {
             return Err(format!(
                 "Server URL {base} must start with https:// (http:// is only allowed for localhost)."
@@ -30,10 +41,13 @@ impl Client {
                 .map_err(|e| format!("Invalid CA certificate {ca_cert}: {e}"))?;
             builder = builder.add_root_certificate(cert);
         }
+        if let Some(t) = timeout {
+            builder = builder.timeout(t);
+        }
         let http = builder
             .https_only(!base.starts_with("http://"))
             .default_headers(headers)
-            .timeout(Duration::from_secs(10))
+            .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -43,10 +57,7 @@ impl Client {
         })
     }
 
-    async fn get<T: serde::de::DeserializeOwned>(
-        &self,
-        req: reqwest::RequestBuilder,
-    ) -> Result<T, String> {
+    async fn send(&self, req: reqwest::RequestBuilder) -> Result<reqwest::Response, String> {
         let res = req.bearer_auth(&self.token).send().await.map_err(|e| {
             if e.is_connect() || e.is_timeout() {
                 format!("Cannot reach Tervano Server at {}. Check Settings and that the server is running.", self.base)
@@ -56,10 +67,7 @@ impl Client {
         })?;
         let status = res.status();
         if status.is_success() {
-            return res
-                .json()
-                .await
-                .map_err(|e| format!("Unexpected server response: {e}"));
+            return Ok(res);
         }
         let msg = res
             .json::<ApiError>()
@@ -70,6 +78,17 @@ impl Client {
             401 => "The server rejected your technician token. Update it in Settings.".into(),
             _ => format!("Server error {status}: {msg}"),
         })
+    }
+
+    async fn get<T: serde::de::DeserializeOwned>(
+        &self,
+        req: reqwest::RequestBuilder,
+    ) -> Result<T, String> {
+        self.send(req)
+            .await?
+            .json()
+            .await
+            .map_err(|e| format!("Unexpected server response: {e}"))
     }
 
     pub async fn search(&self, q: &str) -> Result<Vec<DeviceSummary>, String> {
@@ -84,5 +103,88 @@ impl Client {
     pub async fn details(&self, id: uuid::Uuid) -> Result<DeviceDetails, String> {
         self.get(self.http.get(format!("{}/api/v1/devices/{id}", self.base)))
             .await
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum LiveEvent {
+    Connected,
+    Disconnected(String),
+    Changed(uuid::Uuid),
+    /// Events were missed; reload everything.
+    Resync,
+}
+
+/// `(server_url, token, ca_cert)`; a change in any of them restarts the stream.
+pub type LiveKey = (String, String, String);
+
+/// Follows `GET /api/v1/stream`, reconnecting with backoff, for as long as the subscription lives.
+pub fn live(key: &LiveKey) -> impl Stream<Item = LiveEvent> + use<> {
+    let (base, token, ca) = key.clone();
+    iced::stream::channel(64, async move |mut out: mpsc::Sender<LiveEvent>| {
+        let mut backoff = Duration::from_secs(1);
+        loop {
+            let result = match Client::build(&base, &token, &ca, None) {
+                Ok(c) => follow(&c, &mut out, &mut backoff).await,
+                Err(e) => Err(e),
+            };
+            if let Err(e) = result {
+                let _ = out.send(LiveEvent::Disconnected(e)).await;
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(30));
+        }
+    })
+}
+
+/// Reads one SSE connection until it fails or goes quiet.
+async fn follow(
+    c: &Client,
+    out: &mut mpsc::Sender<LiveEvent>,
+    backoff: &mut Duration,
+) -> Result<(), String> {
+    let mut res = c
+        .send(
+            c.http
+                .get(format!("{}/api/v1/stream", c.base))
+                .header("accept", "text/event-stream"),
+        )
+        .await?;
+    *backoff = Duration::from_secs(1);
+    let _ = out.send(LiveEvent::Connected).await;
+    let mut buf = String::new();
+    loop {
+        // The server sends keep-alives every 15 s; silence beyond this means a dead connection.
+        let chunk = tokio::time::timeout(Duration::from_secs(45), res.chunk())
+            .await
+            .map_err(|_| "Live updates timed out".to_string())?
+            .map_err(|e| format!("Connection to server lost ({e})"))?
+            .ok_or("Server closed the live update stream")?;
+        buf.push_str(&String::from_utf8_lossy(&chunk).replace("\r\n", "\n"));
+        while let Some(end) = buf.find("\n\n") {
+            let block: String = buf.drain(..end + 2).collect();
+            if let Some(ev) = parse_event(&block) {
+                let _ = out.send(ev).await;
+            }
+        }
+    }
+}
+
+/// Parses one SSE event block (`event:` + `data:` lines; `:` lines are keep-alive comments).
+fn parse_event(block: &str) -> Option<LiveEvent> {
+    let (mut name, mut data) = ("", "");
+    for line in block.lines() {
+        if let Some(v) = line.strip_prefix("event:") {
+            name = v.trim();
+        } else if let Some(v) = line.strip_prefix("data:") {
+            data = v.trim();
+        }
+    }
+    match name {
+        STREAM_DEVICE => serde_json::from_str::<DeviceChanged>(data)
+            .ok()
+            .map(|d| LiveEvent::Changed(d.id)),
+        STREAM_RESYNC => Some(LiveEvent::Resync),
+        _ => None,
     }
 }

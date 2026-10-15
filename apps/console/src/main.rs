@@ -81,6 +81,7 @@ enum Message {
     CaCertChanged(String),
     SaveSettings,
     ToggleTheme,
+    Live(api::LiveEvent),
 }
 
 struct Console {
@@ -95,6 +96,10 @@ struct Console {
     devices: Result<Vec<DeviceSummary>, String>,
     selected: Option<uuid::Uuid>,
     details: Option<Result<DeviceDetails, String>>,
+    /// Server push connected; polling is only the fallback while this is false.
+    live: bool,
+    /// A pushed change arrived; refresh once the debounce tick fires.
+    dirty: bool,
 }
 
 impl Console {
@@ -116,6 +121,8 @@ impl Console {
             devices: Ok(Vec::new()),
             selected: None,
             details: None,
+            live: false,
+            dirty: false,
         };
         let task = if configured { c.search() } else { Task::none() };
         (c, task)
@@ -153,6 +160,7 @@ impl Console {
             Message::Search => return self.search(),
             Message::Refresh => {
                 if self.page == Page::Devices && !self.settings.token.is_empty() && !self.loading {
+                    self.dirty = false;
                     let details = self
                         .selected
                         .map(|id| self.load_details(id))
@@ -194,6 +202,24 @@ impl Console {
                 self.page = Page::Devices;
                 return self.search();
             }
+            Message::Live(ev) => match ev {
+                api::LiveEvent::Connected => {
+                    tracing::info!("live updates connected");
+                    self.live = true;
+                    // Catch up on anything missed while disconnected.
+                    self.dirty = true;
+                }
+                api::LiveEvent::Disconnected(e) => {
+                    // Reconnect backoff caps this at one line per 30 s.
+                    tracing::warn!("live updates unavailable: {e}");
+                    self.live = false;
+                }
+                api::LiveEvent::Changed(id) => {
+                    tracing::debug!(%id, "device changed");
+                    self.dirty = true;
+                }
+                api::LiveEvent::Resync => self.dirty = true,
+            },
             Message::ToggleTheme => {
                 self.settings.dark = !self.settings.dark;
                 self.draft.dark = self.settings.dark;
@@ -204,8 +230,23 @@ impl Console {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        // shortcut: 15 s polling until the server can push updates (T-113/T-310).
-        iced::time::every(Duration::from_secs(15)).map(|_| Message::Refresh)
+        if self.settings.token.is_empty() {
+            return Subscription::none();
+        }
+        let key = (
+            self.settings.server_url.clone(),
+            self.settings.token.clone(),
+            self.settings.ca_cert.clone(),
+        );
+        let mut subs = vec![Subscription::run_with(key, api::live).map(Message::Live)];
+        if self.dirty {
+            // Debounce: a burst of pushed changes becomes one refresh.
+            // shortcut: re-runs the whole current search per burst; patch rows in place if this gets heavy (T-307).
+            subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Refresh));
+        } else if !self.live {
+            subs.push(iced::time::every(Duration::from_secs(15)).map(|_| Message::Refresh));
+        }
+        Subscription::batch(subs)
     }
 
     fn theme(&self) -> Theme {
@@ -336,8 +377,13 @@ impl Console {
                     container(header.width(Length::Fill)).style(container::rounded_box),
                     scrollable(column(rows).spacing(2)).height(Length::Fill),
                     text(format!(
-                        "{} device(s){}",
+                        "{} device(s) · {}{}",
                         devices.len(),
+                        if self.live {
+                            "live"
+                        } else {
+                            "live updates unavailable, polling every 15 s"
+                        },
                         if self.loading {
                             " · refreshing…"
                         } else {

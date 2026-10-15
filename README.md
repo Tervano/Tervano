@@ -42,7 +42,8 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Server | Online/offline tracking | Implemented | Win/Linux | Heartbeat timeout + immediate offline on agent shutdown |
 | Discovery | Find computers by hostname | Implemented | Windows | Via server |
 | Discovery | Find computers by logged-in user | Implemented | Windows | From real agent session data, not AD attributes |
-| Console | Search, device list, device details | Implemented | Windows | Loading / empty / error states; 15 s auto-refresh |
+| Console | Search, device list, device details | Implemented | Windows | Loading / empty / error states |
+| Console | Live device updates | Implemented | Windows | Server push (SSE): logons, IP changes, online/offline appear within seconds; falls back to 15 s polling when the stream is down |
 | Console | Serverless mode | Planned | Windows | T-311 |
 | Directory | Active Directory browsing | Planned | Windows | T-600+ |
 | Remote | Screen viewing / remote input / user notification | Planned | Windows | T-500+ |
@@ -113,7 +114,7 @@ See [AGENTS.md](AGENTS.md) for layout, conventions and the commands that must pa
 Phases from [PLAN.md](PLAN.md) §16, tracked in detail in [TASKS.md](TASKS.md):
 
 - [x] Phase 0 — workspace, protocol, config, migrations (CI and docs still open)
-- [ ] Phase 1 — Agent → Server → Console slice (core, TLS, audit, DPAPI done; serverless, live updates open)
+- [ ] Phase 1 — Agent → Server → Console slice (core, TLS, audit, DPAPI, live updates done; serverless open)
 - [ ] Phase 2 — Remote control
 - [ ] Phase 3 — Active Directory
 - [ ] Phase 4 — Background administration

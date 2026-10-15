@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 use std::{path::PathBuf, time::Duration};
 use tervano_server::{
     AppState, Config, app, audit, connect, create_enrollment_token, create_technician,
+    spawn_offline_sweeper,
 };
 
 #[derive(Parser)]
@@ -107,10 +108,8 @@ async fn main() -> anyhow::Result<()> {
     match cli.cmd {
         Cmd::Serve => {
             let addr: std::net::SocketAddr = cfg.listen.parse()?;
-            let state = AppState {
-                db,
-                offline_after_ms: cfg.offline_after_secs as i64 * 1000,
-            };
+            let state = AppState::new(db, cfg.offline_after_secs as i64 * 1000);
+            spawn_offline_sweeper(state.clone());
             let router = app(state).into_make_service();
             let handle = axum_server::Handle::new();
             let h = handle.clone();

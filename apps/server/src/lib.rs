@@ -64,6 +64,50 @@ impl Config {
 pub struct AppState {
     pub db: SqlitePool,
     pub offline_after_ms: i64,
+    /// Ids of devices whose summary may have changed; fanned out to `/api/v1/stream` clients.
+    pub changes: tokio::sync::broadcast::Sender<Uuid>,
+}
+
+impl AppState {
+    pub fn new(db: SqlitePool, offline_after_ms: i64) -> Self {
+        // Bounded: a client that falls this far behind gets a `resync` instead of unbounded memory.
+        let (changes, _) = tokio::sync::broadcast::channel(1024);
+        Self {
+            db,
+            offline_after_ms,
+            changes,
+        }
+    }
+
+    fn publish(&self, id: &str) {
+        if let Ok(id) = id.parse() {
+            // Err just means nobody is listening.
+            let _ = self.changes.send(id);
+        }
+    }
+}
+
+/// Announces devices that just crossed the offline timeout, since no request marks that moment.
+pub fn spawn_offline_sweeper(state: AppState) {
+    const EVERY_MS: i64 = 5_000;
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_millis(EVERY_MS as u64));
+        loop {
+            tick.tick().await;
+            let cutoff = now_millis() - state.offline_after_ms;
+            let ids: Result<Vec<String>, _> = sqlx::query_scalar(
+                "SELECT id FROM devices WHERE revoked = 0 AND last_seen <= ? AND last_seen > ?",
+            )
+            .bind(cutoff)
+            .bind(cutoff - EVERY_MS)
+            .fetch_all(&state.db)
+            .await;
+            match ids {
+                Ok(ids) => ids.iter().for_each(|id| state.publish(id)),
+                Err(e) => tracing::warn!("offline sweep failed: {e}"),
+            }
+        }
+    });
 }
 
 pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
@@ -134,6 +178,7 @@ pub fn app(state: AppState) -> Router {
         .route("/devices", get(search_devices))
         .route("/devices/{id}", get(device_details))
         .route("/audit", get(list_audit))
+        .route("/stream", get(stream_changes))
         .layer(middleware::from_fn(require_protocol))
         // State JSON is small; this bounds memory per request.
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024));
@@ -326,6 +371,7 @@ async fn enroll(
     write_projections(&mut tx, &id.to_string(), &req.state).await?;
     tx.commit().await?;
     tracing::info!(device = %id, hostname = %req.state.hostname, "device enrolled");
+    s.publish(&id.to_string());
     let actor = format!("device:{id}");
     audit(
         &s.db,
@@ -393,17 +439,22 @@ async fn ingest_events(
     let mut events = events;
     events.sort_by_key(|e| e.seq);
     let mut tx = s.db.begin().await?;
-    let mut last_seq: i64 = sqlx::query_scalar("SELECT last_seq FROM devices WHERE id = ?")
-        .bind(&dev.id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let (mut last_seq, prev_seen): (i64, i64) =
+        sqlx::query_as("SELECT last_seq, last_seen FROM devices WHERE id = ?")
+            .bind(&dev.id)
+            .fetch_one(&mut *tx)
+            .await?;
     let now = now_millis();
+    // A device coming back from offline is a visible change even if only a heartbeat arrived.
+    let was_offline = prev_seen <= now - s.offline_after_ms;
+    let mut changed = false;
     for ev in events {
         let seq = ev.seq as i64;
         if seq <= last_seq {
             continue;
         }
         last_seq = seq;
+        changed |= was_offline || !matches!(ev.kind, EventKind::Heartbeat);
         match &ev.kind {
             EventKind::Startup { state } | EventKind::StateChanged { state } => {
                 sqlx::query("UPDATE devices SET hostname = ?, os = ?, state_json = ? WHERE id = ?")
@@ -434,6 +485,9 @@ async fn ingest_events(
             .await?;
     }
     tx.commit().await?;
+    if changed {
+        s.publish(&dev.id);
+    }
     Ok(Json(EventAck {
         last_seq: last_seq as u64,
     }))
@@ -513,6 +567,28 @@ fn primary_ip(addrs: &[NetAddress]) -> Option<String> {
         .find(|a| !a.address.contains(':'))
         .or_else(|| addrs.iter().find(usable))
         .map(|a| a.address.clone())
+}
+
+/// Server-sent events: `device` (data `{"id": ...}`) when a device's summary may have changed,
+/// `resync` when this client missed events and should reload everything.
+// shortcut: every technician sees every device id; scope by RBAC once it exists (T-806).
+async fn stream_changes(
+    State(s): State<AppState>,
+    _tech: TechAuth,
+) -> axum::response::sse::Sse<
+    impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use tokio_stream::{StreamExt, wrappers::BroadcastStream};
+    let events = BroadcastStream::new(s.changes.subscribe()).map(|r| {
+        Ok(match r {
+            Ok(id) => Event::default()
+                .event(STREAM_DEVICE)
+                .data(serde_json::to_string(&DeviceChanged { id }).expect("serializes")),
+            Err(_lagged) => Event::default().event(STREAM_RESYNC).data("{}"),
+        })
+    });
+    Sse::new(events).keep_alive(KeepAlive::default())
 }
 
 #[derive(Deserialize)]

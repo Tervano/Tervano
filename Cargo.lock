@@ -4532,7 +4532,9 @@ dependencies = [
  "iced",
  "reqwest",
  "serde",
+ "serde_json",
  "tervano-protocol",
+ "tokio",
  "toml",
  "tracing",
  "tracing-subscriber",
@@ -4567,6 +4569,7 @@ dependencies = [
  "sqlx",
  "tervano-protocol",
  "tokio",
+ "tokio-stream",
  "toml",
  "tower",
  "tracing",
@@ -4753,6 +4756,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

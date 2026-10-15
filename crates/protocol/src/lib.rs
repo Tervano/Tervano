@@ -153,6 +153,16 @@ pub struct DeviceDetails {
     pub state: DeviceState,
 }
 
+/// SSE event names on `GET /api/v1/stream`.
+pub const STREAM_DEVICE: &str = "device";
+pub const STREAM_RESYNC: &str = "resync";
+
+/// Data of a [`STREAM_DEVICE`] event: this device's summary may have changed; refetch it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceChanged {
+    pub id: Uuid,
+}
+
 /// One row of the server's append-only audit log.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuditRecord {
