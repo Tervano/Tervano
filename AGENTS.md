@@ -52,8 +52,14 @@ Local end-to-end run: see README "Quick start". Put scratch DBs/configs in `dev-
 
   Create yours once from the main checkout: `git worktree add -b agent/<you> ../tervano-<you> origin/main`.
   Each worktree has its own `target/` (first build is a full build) and its own git-ignored `dev-data/`.
-- Trunk-based on `main`; small commits; Conventional Commit subjects (`feat(server): …`, `fix(agent): …`, `chore(tasks): …`).
-- Land work on `main` from your branch: `git fetch origin && git rebase origin/main`, then `git push origin HEAD:main`. Never force-push `main`; your `agent/*` branch is private and needn't be pushed.
+- Small commits with Conventional Commit subjects (`feat(server): …`, `fix(agent): …`, `chore(tasks): …`).
+- **Sprints** (see TASKS.md "How to use"): lock tasks → work on your branch → merge to `main` at sprint end.
+  - **Lock** (push immediately, alone). At sprint start your branch equals `origin/main`, so:
+    `git fetch origin && git rebase origin/main`, edit only the TASKS.md rows, commit `chore(tasks): lock T-xxx`, `git push origin HEAD:main`.
+    Locking more tasks mid-sprint (your branch has unmerged work), use a throwaway worktree so only the lock lands:
+    `git worktree add --detach ../tervano-lock origin/main`, edit + commit TASKS.md there, `git push origin HEAD:main`, `git worktree remove ../tervano-lock`, then `git rebase origin/main` in your own worktree.
+  - **Merge** at sprint end (and at least once per session): `git fetch origin && git rebase origin/main`; resolve conflicts (in TASKS.md keep both agents' rows; never change the other agent's locked rows); then `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` must pass; mark tasks `[x]` with verification notes; `git push origin HEAD:main`. If the push is rejected because the other agent merged first, repeat.
+  - Never force-push `main`. Your `agent/*` branch is private and needn't be pushed.
 - Stage files explicitly (`git add <paths>`), not `git add -A`.
 - Update TASKS.md (status + verification note) in the same commit as the feature. Update README status table when a user-visible feature changes.
 - Don't edit files under a crate where the other agent has an in-progress task without noting it in TASKS.md.

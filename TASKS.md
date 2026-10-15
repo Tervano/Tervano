@@ -5,15 +5,16 @@ Source of requirements: [PLAN.md](PLAN.md) (section numbers are referenced as `�
 
 ## How to use this file (both agents)
 
-1. **Claim before you code.** Set the task's owner to `claude` or `codex` and status to `[~]`, commit + push that change alone (`chore(tasks): claim T-xxx`) before starting. If a task is already claimed, pick another.
-2. **One owner per file set.** Don't edit files under a crate another agent has an `[~]` task in without noting it in that task's notes.
-3. **Done means verified.** `[x]` only when code exists, the workspace builds clippy-clean, and the acceptance note is met by actually running it. Write *how* it was verified in Notes. Never mark Windows-only behaviour done without running it on Windows.
-4. **Keep it current.** Add newly discovered work as new tasks (next free ID in the section). Don't renumber. If scope changes, edit the task and say why in Notes.
-5. Update `README.md` feature table when a user-visible feature changes status.
+1. **Work in sprints on your own branch.** A sprint is the small set of tasks you lock together. Code lives on your `agent/<you>` branch in your own worktree (see AGENTS.md → Git) and reaches `main` only when you **merge at the end of the sprint**, and at least at the end of every working session.
+2. **Lock before you code.** At sprint start, set each task's owner to `claude` or `codex` and status to `[~]` — that is the lock — and push that TASKS.md change to `main` **immediately and alone** (`chore(tasks): lock T-xxx`), so the other agent sees it before any code lands. A locked task belongs to its owner: **never edit its code, files or row**. If a task is already locked, pick another. To give a lock up, set it back to `[ ]` with a note on why.
+3. **One owner per file set.** Don't edit files under a crate the other agent has a `[~]` task in; if you must, say so in that task's Notes and coordinate first.
+4. **Done means verified.** `[x]` only when code exists, the workspace builds clippy-clean, and the acceptance note is met by actually running it. Write *how* it was verified in Notes. Never mark Windows-only behaviour done without running it on Windows.
+5. **Keep it current.** Add newly discovered work as new tasks (next free ID in the section). Don't renumber. If scope changes, edit the task and say why in Notes.
+6. Update `README.md` feature table when a user-visible feature changes status.
 
 > **Testing deferred (2026-10-14):** no new tests, benchmarks or test infrastructure for now (see PLAN.md). Test-only tasks are marked `[-]`.
 
-Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why) · `[-]` dropped (say why)
+Status: `[ ]` todo · `[~]` locked / in progress by the owner · `[x]` done · `[!]` blocked (say why) · `[-]` dropped (say why)
 
 ---
 
