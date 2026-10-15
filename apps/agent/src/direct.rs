@@ -75,6 +75,7 @@ enum Op {
     ListFiles,
     ReadFile,
     WriteFile,
+    ManageSoftware,
 }
 
 impl Op {
@@ -95,6 +96,7 @@ impl Op {
             Op::ListFiles => "files.list",
             Op::ReadFile => "files.read",
             Op::WriteFile => "files.write",
+            Op::ManageSoftware => "software.manage",
         }
     }
 
@@ -113,6 +115,7 @@ impl Op {
                 // The agent can read any file (credential stores included) when it runs as SYSTEM.
                 | Op::ReadFile
                 | Op::WriteFile
+                | Op::ManageSoftware
         )
     }
 }
@@ -662,6 +665,65 @@ async fn files_op(
         .map_err(|e| api_err(StatusCode::CONFLICT, e))
 }
 
+/// Installers can run long; they get the maximum job timeout below 1 h.
+const INSTALL_TIMEOUT_SECS: u32 = 1800;
+
+/// Runs an install/uninstall command as a tracked job so the Console can poll it like Commands.
+fn software_job(
+    jobs: &Jobs,
+    tech: &Technician,
+    what: &str,
+    script: String,
+) -> ApiResult<Json<ExecStatus>> {
+    tracing::info!(technician = %tech.0, what, "software change");
+    let id = jobs
+        .start(
+            &tech.0,
+            ExecRequest {
+                shell: Shell::Cmd,
+                script,
+                context: ExecContext::Agent,
+                timeout_secs: Some(INSTALL_TIMEOUT_SECS),
+            },
+        )
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))?;
+    jobs.status(id)
+        .map(Json)
+        .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "job vanished"))
+}
+
+async fn software_uninstall(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    Extension(jobs): Extension<Arc<Jobs>>,
+    headers: HeaderMap,
+    Json(req): Json<UninstallRequest>,
+) -> ApiResult<Json<ExecStatus>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::ManageSoftware)?;
+    let (name, script) =
+        blocking(move || software::uninstall_command(&req.uninstall_key, &req.scope))
+            .await?
+            .map_err(|e| api_err(StatusCode::CONFLICT, e))?;
+    software_job(&jobs, &tech, &format!("uninstall {name}"), script)
+}
+
+async fn software_install(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    Extension(jobs): Extension<Arc<Jobs>>,
+    headers: HeaderMap,
+    Json(req): Json<InstallRequest>,
+) -> ApiResult<Json<ExecStatus>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::ManageSoftware)?;
+    let path = req.msi_path.clone();
+    let script = blocking(move || software::install_command(&req.msi_path))
+        .await?
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))?;
+    software_job(&jobs, &tech, &format!("install {path}"), script)
+}
+
 /// Serves direct management until `stop` fires.
 pub async fn serve(
     cfg: DirectConfig,
@@ -680,6 +742,8 @@ pub async fn serve(
         .route("/v1/eventlog/events", get(event_records))
         .route("/v1/inventory/hardware", get(hardware_inventory))
         .route("/v1/inventory/software", get(software_inventory))
+        .route("/v1/software/uninstall", post(software_uninstall))
+        .route("/v1/software/install", post(software_install))
         .route("/v1/registry/key", get(registry_key))
         .route("/v1/registry/export", get(registry_export))
         .route("/v1/registry/value", post(registry_set_value))

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.10";
+pub const PROTOCOL_VERSION: &str = "1.11";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -538,6 +538,19 @@ pub enum FileOp {
     Copy { from: String, to: String },
     Delete { path: String, recursive: bool },
     Mkdir { path: String },
+}
+
+/// Body of `POST /v1/software/uninstall`; identifies an entry from the software inventory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UninstallRequest {
+    pub uninstall_key: String,
+    pub scope: String,
+}
+
+/// Body of `POST /v1/software/install`: an MSI already on the endpoint (e.g. uploaded via files).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstallRequest {
+    pub msi_path: String,
 }
 
 /// SSE event names on `GET /api/v1/stream`.

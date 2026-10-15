@@ -189,6 +189,35 @@ enum Message {
     FilesConfirm,
     FilesCancel,
     FilesOpDone(Result<String, String>),
+    SwAskUninstall(String, UninstallRequest),
+    SwMsiPath(String),
+    SwAskInstall,
+    SwConfirm,
+    SwCancel,
+}
+
+/// A software change awaiting confirmation: (description, request).
+#[derive(Debug, Clone)]
+enum SwChange {
+    Uninstall(String, UninstallRequest),
+    Install(InstallRequest),
+}
+
+/// Meaning of common Windows Installer exit codes (msiexec).
+fn msi_outcome(code: i32) -> &'static str {
+    match code {
+        0 => "succeeded",
+        3010 => "succeeded; a restart is required to finish",
+        1641 => "succeeded; the installer started a restart",
+        1602 => "cancelled",
+        1603 => "failed (fatal error during installation)",
+        1605 => "the product is not installed",
+        1618 => "another installation is already in progress; try again later",
+        1619 | 1620 => "the package could not be opened (missing or corrupt .msi)",
+        1625 | 1643 => "blocked by system policy",
+        1638 => "another version of this product is already installed",
+        _ => "finished with an installer-specific code",
+    }
 }
 
 /// Joins a remote Windows directory and a name (`""` + `C:\` = `C:\`).
@@ -599,6 +628,10 @@ struct Console {
     files_rename: Option<(String, String)>,
     files_recursive: bool,
     files_confirm: Option<FileOp>,
+    sw_confirm: Option<SwChange>,
+    sw_msi_path: String,
+    /// The software job started from the Software tab is tracked in `cmd_job`; this marks it.
+    sw_job_label: Option<String>,
 }
 
 impl Console {
@@ -681,6 +714,9 @@ impl Console {
             files_rename: None,
             files_recursive: false,
             files_confirm: None,
+            sw_confirm: None,
+            sw_msi_path: String::new(),
+            sw_job_label: None,
         };
         let task = if configured { c.search() } else { Task::none() };
         (c, task)
@@ -1197,6 +1233,7 @@ impl Console {
                         timeout_secs: self.cmd_timeout.parse().ok(),
                     };
                     self.cmd_job = None;
+                    self.sw_job_label = None;
                     return Task::perform(direct::exec_start(t, req), Message::CmdUpdate);
                 }
             }
@@ -1332,6 +1369,36 @@ impl Console {
                 self.files_notice = Some(r);
                 if let Some(addr) = self.direct_selected.clone() {
                     return self.load_direct(&addr);
+                }
+            }
+            Message::SwAskUninstall(name, req) => {
+                self.sw_confirm = Some(SwChange::Uninstall(name, req));
+            }
+            Message::SwMsiPath(p) => self.sw_msi_path = p,
+            Message::SwAskInstall => {
+                let msi_path = self.sw_msi_path.trim().trim_matches('"').to_owned();
+                if !msi_path.is_empty() {
+                    self.sw_confirm = Some(SwChange::Install(InstallRequest { msi_path }));
+                }
+            }
+            Message::SwCancel => self.sw_confirm = None,
+            Message::SwConfirm => {
+                if let (Some(change), Some(t)) = (
+                    self.sw_confirm.take(),
+                    self.direct_selected.as_deref().and_then(|a| self.target(a)),
+                ) {
+                    self.cmd_job = None;
+                    self.cmd_notice = None;
+                    return match change {
+                        SwChange::Uninstall(name, req) => {
+                            self.sw_job_label = Some(format!("Uninstall {name}"));
+                            Task::perform(direct::software_uninstall(t, req), Message::CmdUpdate)
+                        }
+                        SwChange::Install(req) => {
+                            self.sw_job_label = Some(format!("Install {}", req.msi_path));
+                            Task::perform(direct::software_install(t, req), Message::CmdUpdate)
+                        }
+                    };
                 }
             }
             Message::KillDone(r) => {
@@ -2270,7 +2337,73 @@ impl Console {
             Some((_, Err(e))) => return error_box(e),
             Some((_, Ok(inv))) => inv,
         };
-        let mut col = column![].spacing(6);
+        let mut col = column![
+            row![
+                text_input(
+                    r"MSI on the agent to install silently, e.g. C:\Temp\app.msi (upload it in Files)",
+                    &self.sw_msi_path
+                )
+                .on_input(Message::SwMsiPath)
+                .on_submit(Message::SwAskInstall)
+                .padding(6),
+                button(text("Install"))
+                    .style(button::primary)
+                    .on_press(Message::SwAskInstall),
+            ]
+            .spacing(6)
+        ]
+        .spacing(6);
+        if let Some(change) = &self.sw_confirm {
+            let what = match change {
+                SwChange::Uninstall(name, _) => {
+                    format!("Silently uninstall {name}? Users of it will lose it immediately.")
+                }
+                SwChange::Install(r) => {
+                    format!("Silently install {} on this computer?", r.msi_path)
+                }
+            };
+            col = col.push(
+                container(
+                    column![
+                        text(what),
+                        row![
+                            button(text("Confirm"))
+                                .style(button::danger)
+                                .on_press(Message::SwConfirm),
+                            button(text("Cancel"))
+                                .style(button::secondary)
+                                .on_press(Message::SwCancel),
+                        ]
+                        .spacing(8),
+                    ]
+                    .spacing(8),
+                )
+                .padding(10)
+                .width(Length::Fill)
+                .style(container::bordered_box),
+            );
+        }
+        if let (Some(label), Some((_, job))) = (&self.sw_job_label, &self.cmd_job) {
+            let (msg, style): (String, fn(&Theme) -> text::Style) = match (job.state, job.exit_code)
+            {
+                (ExecState::Running, _) => (format!("{label}: running…"), text::secondary),
+                (ExecState::Exited, Some(c)) => (
+                    format!("{label}: {} (exit code {c})", msi_outcome(c)),
+                    if matches!(c, 0 | 3010 | 1641) {
+                        text::success
+                    } else {
+                        text::danger
+                    },
+                ),
+                (state, _) => (format!("{label}: {state:?}"), text::danger),
+            };
+            col = col.push(text(msg).size(13).style(style));
+        }
+        if let Some(n) = &self.cmd_notice
+            && self.sw_job_label.is_some()
+        {
+            col = col.push(text(n.clone()).size(13).style(text::danger));
+        }
         if !inv.reboot_pending.is_empty() {
             col = col.push(
                 container(
@@ -2304,6 +2437,7 @@ impl Console {
             text("Installed").size(12).width(Length::FillPortion(1)),
             text("Size").size(12).width(Length::FillPortion(1)),
             text("Scope").size(12).width(Length::FillPortion(2)),
+            Space::new().width(80),
         ]
         .spacing(4);
         // shortcut: renders every matching row (a few hundred); virtualize with T-307.
@@ -2336,8 +2470,25 @@ impl Console {
                 text(a.scope.strip_prefix("machine-").unwrap_or(&a.scope))
                     .size(12)
                     .width(Length::FillPortion(2)),
+                button(text("Uninstall").size(12))
+                    .style(button::subtle)
+                    .padding([2, 6])
+                    .width(80)
+                    // Only machine-wide entries with an uninstaller can be removed silently from here.
+                    .on_press_maybe((a.has_uninstaller && a.scope.starts_with("machine-")).then(
+                        || {
+                            Message::SwAskUninstall(
+                                a.name.clone(),
+                                UninstallRequest {
+                                    uninstall_key: a.uninstall_key.clone(),
+                                    scope: a.scope.clone(),
+                                },
+                            )
+                        }
+                    )),
             ]
             .spacing(4)
+            .align_y(Alignment::Center)
             .into()
         });
         col.push(

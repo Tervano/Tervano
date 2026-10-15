@@ -574,3 +574,23 @@ pub async fn upload(
         done.size
     ))
 }
+
+pub async fn software_uninstall(t: Target, req: UninstallRequest) -> Result<ExecStatus, String> {
+    json(
+        send(&t, |c, base| {
+            c.post(format!("{base}/v1/software/uninstall")).json(&req)
+        })
+        .await?,
+    )
+    .await
+}
+
+pub async fn software_install(t: Target, req: InstallRequest) -> Result<ExecStatus, String> {
+    json(
+        send(&t, |c, base| {
+            c.post(format!("{base}/v1/software/install")).json(&req)
+        })
+        .await?,
+    )
+    .await
+}

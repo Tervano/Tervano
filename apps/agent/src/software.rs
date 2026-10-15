@@ -105,3 +105,70 @@ pub fn inventory() -> SoftwareInventory {
         reboot_pending: Vec::new(),
     }
 }
+
+/// msiexec by full path; `%SystemRoot%` is expanded by cmd.exe when the job runs.
+const MSIEXEC: &str = r#""%SystemRoot%\System32\msiexec.exe""#;
+
+/// Builds the silent uninstall command for an inventory entry.
+#[cfg(windows)]
+pub fn uninstall_command(key: &str, scope: &str) -> Result<(String, String), String> {
+    use crate::reg::{HKEY_LOCAL_MACHINE, Key, View};
+    if key.is_empty() || key.contains(['\\', '/', '\0']) {
+        return Err("invalid uninstall key".into());
+    }
+    let view = match scope {
+        "machine-x64" => View::Wow64_64,
+        "machine-x86" => View::Wow64_32,
+        // Per-user installs live in the user's profile and must be removed as that user (T-725).
+        _ => return Err("per-user installs can only be removed as the signed-in user, which is not available yet".into()),
+    };
+    let k = Key::open(
+        HKEY_LOCAL_MACHINE,
+        &format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{key}"),
+        view,
+    )
+    .ok_or("that application is no longer installed")?;
+    let name = k.string("DisplayName").unwrap_or_else(|| key.to_owned());
+    let is_guid = key.len() == 38
+        && key.starts_with('{')
+        && key.ends_with('}')
+        && key[1..37]
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || c == '-');
+    if k.dword("WindowsInstaller") == Some(1) && is_guid {
+        return Ok((name, format!("{MSIEXEC} /x {key} /qn /norestart")));
+    }
+    match k.string("QuietUninstallString") {
+        Some(cmd) => Ok((name, cmd)),
+        None => Err(format!(
+            "{name} has no silent uninstaller registered; run its uninstaller from Commands with the vendor's silent switch"
+        )),
+    }
+}
+
+#[cfg(not(windows))]
+pub fn uninstall_command(_: &str, _: &str) -> Result<(String, String), String> {
+    Err("software management is only implemented on Windows".into())
+}
+
+/// Builds the silent install command for an MSI already on the endpoint.
+pub fn install_command(msi_path: &str) -> Result<String, String> {
+    let p = crate::files::local_path(msi_path)?;
+    let s = p.display().to_string();
+    // cmd.exe expands %VAR% even inside quotes, which would change the path.
+    if s.contains('%') {
+        return Err("installer path may not contain '%'".into());
+    }
+    if !s.to_lowercase().ends_with(".msi") {
+        return Err(
+            "only .msi packages can be installed this way; run other installers from Commands"
+                .into(),
+        );
+    }
+    if !p.is_file() {
+        return Err(format!(
+            "{s} not found on this computer (upload it with Files first)"
+        ));
+    }
+    Ok(format!(r#"{MSIEXEC} /i "{s}" /qn /norestart"#))
+}
