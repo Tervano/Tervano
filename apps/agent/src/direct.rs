@@ -5,7 +5,7 @@
 //! certificate, which consoles pin by SHA-256 fingerprint (`TervanoAgent direct-fingerprint`).
 //! Authorization is checked here, per operation, never just in the Console (PLAN §12.9).
 
-use crate::{collect, eventlog, inventory, processes::Processes, secure, services};
+use crate::{collect, eventlog, inventory, processes::Processes, secure, services, software};
 use anyhow::Context;
 use axum::{
     Extension, Json, Router,
@@ -392,6 +392,16 @@ async fn hardware_inventory(
     Ok(Json(blocking(inventory::hardware).await?))
 }
 
+async fn software_inventory(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+) -> ApiResult<Json<SoftwareInventory>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::ReadInventory)?;
+    Ok(Json(blocking(software::inventory).await?))
+}
+
 /// Serves direct management until `stop` fires.
 pub async fn serve(
     cfg: DirectConfig,
@@ -409,6 +419,7 @@ pub async fn serve(
         .route("/v1/eventlog/channels", get(event_channels))
         .route("/v1/eventlog/events", get(event_records))
         .route("/v1/inventory/hardware", get(hardware_inventory))
+        .route("/v1/inventory/software", get(software_inventory))
         .route("/v1/services/{name}/control", post(control_service))
         .route(
             "/v1/services/{name}/start-type",

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.6";
+pub const PROTOCOL_VERSION: &str = "1.7";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -306,6 +306,30 @@ pub struct DiskInfo {
 pub struct BatteryInfo {
     pub charge_percent: Option<u8>,
     pub on_ac_power: Option<bool>,
+}
+
+/// Installed software and reboot state (`GET /v1/inventory/software`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SoftwareInventory {
+    pub apps: Vec<InstalledApp>,
+    /// Why Windows wants a restart; empty when no reboot is pending.
+    pub reboot_pending: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InstalledApp {
+    pub name: String,
+    pub version: Option<String>,
+    pub publisher: Option<String>,
+    /// As recorded by the installer, usually `YYYYMMDD`.
+    pub install_date: Option<String>,
+    pub size_bytes: Option<u64>,
+    /// "machine-x64", "machine-x86" or "user:DOMAIN\name".
+    pub scope: String,
+    /// Uninstall registry key name (MSI product code for MSI installs).
+    pub uninstall_key: String,
+    pub msi: bool,
+    pub has_uninstaller: bool,
 }
 
 /// SSE event names on `GET /api/v1/stream`.

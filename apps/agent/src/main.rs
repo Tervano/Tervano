@@ -3,10 +3,13 @@ mod direct;
 mod eventlog;
 mod inventory;
 mod processes;
+#[cfg(windows)]
+mod reg;
 mod secure;
 #[cfg(windows)]
 mod service;
 mod services;
+mod software;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -384,6 +387,7 @@ usage: TervanoAgent <command>
   run [config]                 run in the foreground (default config: agent.toml)
   collect                      print the state this agent would report, as JSON
   inventory                    print this computer's hardware inventory, as JSON
+  software                     print installed software and pending-reboot reasons, as JSON
   direct-fingerprint [config]  print the SHA-256 fingerprint consoles pin for direct management
   service install [config]     install the Windows service (admin; default config: %ProgramData%\\Tervano\\Agent\\agent.toml)
   service uninstall            remove the Windows service (admin)";
@@ -426,6 +430,10 @@ fn main() -> anyhow::Result<()> {
         }
         ["inventory"] => {
             println!("{}", serde_json::to_string_pretty(&inventory::hardware())?);
+            Ok(())
+        }
+        ["software"] => {
+            println!("{}", serde_json::to_string_pretty(&software::inventory())?);
             Ok(())
         }
         ["collect"] => {

@@ -136,6 +136,8 @@ enum Message {
     EvtToggle(u64),
     EvtExport,
     HwLoaded(String, Result<HardwareInventory, String>),
+    SwLoaded(String, Result<SoftwareInventory, String>),
+    SwFilter(String),
 }
 
 /// Level filter for the Events tab: `None` = any.
@@ -241,6 +243,7 @@ enum DirectTab {
     Services,
     Events,
     Hardware,
+    Software,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -305,6 +308,8 @@ struct Console {
     evt_expanded: Option<u64>,
     evt_notice: Option<Result<String, String>>,
     hw: Option<(String, Result<HardwareInventory, String>)>,
+    sw: Option<(String, Result<SoftwareInventory, String>)>,
+    sw_filter: String,
 }
 
 impl Console {
@@ -357,6 +362,8 @@ impl Console {
             evt_expanded: None,
             evt_notice: None,
             hw: None,
+            sw: None,
+            sw_filter: String::new(),
         };
         let task = if configured { c.search() } else { Task::none() };
         (c, task)
@@ -442,6 +449,9 @@ impl Console {
             }
             DirectTab::Hardware => Task::perform(direct::hardware(t), move |r| {
                 Message::HwLoaded(addr.clone(), r)
+            }),
+            DirectTab::Software => Task::perform(direct::software(t), move |r| {
+                Message::SwLoaded(addr.clone(), r)
             }),
         };
         Task::batch([device, tab])
@@ -569,6 +579,7 @@ impl Console {
                     self.evt_expanded = None;
                     self.evt_notice = None;
                     self.hw = None;
+                    self.sw = None;
                 }
                 self.direct_selected = Some(address.clone());
                 return self.load_direct(&address);
@@ -673,6 +684,12 @@ impl Console {
                     self.hw = Some((address, r));
                 }
             }
+            Message::SwLoaded(address, r) => {
+                if self.direct_selected.as_deref() == Some(address.as_str()) {
+                    self.sw = Some((address, r));
+                }
+            }
+            Message::SwFilter(f) => self.sw_filter = f,
             Message::KillDone(r) => {
                 self.kill_notice = Some(r);
                 if let Some(addr) = self.direct_selected.clone() {
@@ -1050,6 +1067,7 @@ impl Console {
                             DirectTab::Services => self.svcs_view(),
                             DirectTab::Events => self.evts_view(),
                             DirectTab::Hardware => self.hw_view(),
+                            DirectTab::Software => self.sw_view(),
                         };
                         column![
                             row![
@@ -1057,7 +1075,8 @@ impl Console {
                                 tab("Processes", DirectTab::Processes),
                                 tab("Services", DirectTab::Services),
                                 tab("Events", DirectTab::Events),
-                                tab("Hardware", DirectTab::Hardware)
+                                tab("Hardware", DirectTab::Hardware),
+                                tab("Software", DirectTab::Software)
                             ]
                             .spacing(6),
                             body
@@ -1084,6 +1103,101 @@ impl Console {
             }
         };
         column![top, content].spacing(12).into()
+    }
+
+    fn sw_view(&self) -> Element<'_, Message> {
+        let inv = match &self.sw {
+            None => return centered("Reading installed software…"),
+            Some((_, Err(e))) => return error_box(e),
+            Some((_, Ok(inv))) => inv,
+        };
+        let mut col = column![].spacing(6);
+        if !inv.reboot_pending.is_empty() {
+            col = col.push(
+                container(
+                    text(format!(
+                        "Restart pending: {}",
+                        inv.reboot_pending.join("; ")
+                    ))
+                    .size(13),
+                )
+                .padding(8)
+                .width(Length::Fill)
+                .style(container::warning),
+            );
+        }
+        let f = self.sw_filter.to_lowercase();
+        let shown: Vec<&InstalledApp> = inv
+            .apps
+            .iter()
+            .filter(|a| {
+                f.is_empty()
+                    || a.name.to_lowercase().contains(&f)
+                    || a.publisher
+                        .as_deref()
+                        .is_some_and(|p| p.to_lowercase().contains(&f))
+            })
+            .collect();
+        let header = row![
+            text("Name").size(12).width(Length::FillPortion(4)),
+            text("Version").size(12).width(Length::FillPortion(2)),
+            text("Publisher").size(12).width(Length::FillPortion(3)),
+            text("Installed").size(12).width(Length::FillPortion(1)),
+            text("Size").size(12).width(Length::FillPortion(1)),
+            text("Scope").size(12).width(Length::FillPortion(2)),
+        ]
+        .spacing(4);
+        // shortcut: renders every matching row (a few hundred); virtualize with T-307.
+        let rows = shown.iter().map(|a| {
+            // YYYYMMDD → YYYY-MM-DD when it looks like one.
+            let date = a.install_date.as_deref().map(|d| {
+                if d.len() == 8 && d.bytes().all(|b| b.is_ascii_digit()) {
+                    format!("{}-{}-{}", &d[..4], &d[4..6], &d[6..])
+                } else {
+                    d.to_owned()
+                }
+            });
+            row![
+                text(&a.name).size(13).width(Length::FillPortion(4)),
+                text(a.version.as_deref().unwrap_or("—"))
+                    .size(13)
+                    .width(Length::FillPortion(2)),
+                text(a.publisher.as_deref().unwrap_or("—"))
+                    .size(13)
+                    .width(Length::FillPortion(3)),
+                text(date.unwrap_or_else(|| "—".into()))
+                    .size(12)
+                    .width(Length::FillPortion(1)),
+                text(a.size_bytes.map_or("—".into(), |b| format!(
+                    "{:.0} MB",
+                    b as f64 / 1_048_576.0
+                )))
+                .size(12)
+                .width(Length::FillPortion(1)),
+                text(a.scope.strip_prefix("machine-").unwrap_or(&a.scope))
+                    .size(12)
+                    .width(Length::FillPortion(2)),
+            ]
+            .spacing(4)
+            .into()
+        });
+        col.push(
+            text_input("Filter by name or publisher…", &self.sw_filter)
+                .on_input(Message::SwFilter)
+                .padding(8),
+        )
+        .push(container(header).style(container::rounded_box))
+        .push(scrollable(column(rows).spacing(3)).height(Length::Fill))
+        .push(
+            text(format!(
+                "{} of {} applications",
+                shown.len(),
+                inv.apps.len()
+            ))
+            .size(12)
+            .style(text::secondary),
+        )
+        .into()
     }
 
     fn hw_view(&self) -> Element<'_, Message> {

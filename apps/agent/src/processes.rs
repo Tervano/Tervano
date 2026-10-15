@@ -107,6 +107,9 @@ impl Processes {
     }
 }
 
+/// Account name (domain and user) for a SID string; `None` if it can't be resolved.
+pub(crate) use platform::account_name;
+
 #[cfg(windows)]
 mod platform {
     use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};

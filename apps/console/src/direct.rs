@@ -292,3 +292,7 @@ pub async fn events(t: Target, q: EventQuery) -> Result<Vec<EventRecord>, String
 pub async fn hardware(t: Target) -> Result<HardwareInventory, String> {
     json(send(&t, |c, base| c.get(format!("{base}/v1/inventory/hardware"))).await?).await
 }
+
+pub async fn software(t: Target) -> Result<SoftwareInventory, String> {
+    json(send(&t, |c, base| c.get(format!("{base}/v1/inventory/software"))).await?).await
+}
