@@ -1,0 +1,2 @@
+# sqlx checksums migrations; line-ending conversion would break existing databases.
+*.sql text eol=lf
