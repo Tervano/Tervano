@@ -13,16 +13,18 @@ Requirements live in [PLAN.md](PLAN.md). Work is tracked in [TASKS.md](TASKS.md)
 
 Add a new crate under `crates/` only when two apps need the same non-wire code. Don't pre-create the crates listed in PLAN §4 until there is code for them.
 
-## Build & test
+## Build
+
+**Testing is deferred for now (PLAN.md, 2026-10-14): don't write new tests or test infrastructure.**
 
 ```bash
 cargo build --workspace
-cargo test --workspace
+cargo test --workspace   # existing tests only; fix or delete ones your change obsoletes
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```
 
-All four must be clean before pushing to `main`. Windows (MSVC) is the primary target; the server must also build on Linux.
+All of these must be clean before pushing to `main`. Windows (MSVC) is the primary target; the server must also build on Linux.
 
 Local end-to-end run: see README "Quick start". Put scratch DBs/configs in `dev-data/` (git-ignored).
 
@@ -36,7 +38,7 @@ Local end-to-end run: see README "Quick start". Put scratch DBs/configs in `dev-
 - Errors: `anyhow` in binaries, typed/`AppError` at the HTTP boundary. Don't `unwrap()` on anything input-derived.
 - Logging: `tracing`, honour `RUST_LOG`.
 - Comments explain *why*, not *what*.
-- Tests: new server endpoints get a case in `apps/server/tests/api.rs`; new protocol types get a serde round-trip test.
+- Tests: deferred. No new tests required; verify features by running them and say how in TASKS.md Notes.
 
 ## Git
 

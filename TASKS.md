@@ -7,9 +7,11 @@ Source of requirements: [PLAN.md](PLAN.md) (section numbers are referenced as `�
 
 1. **Claim before you code.** Set the task's owner to `claude` or `codex` and status to `[~]`, commit + push that change alone (`chore(tasks): claim T-xxx`) before starting. If a task is already claimed, pick another.
 2. **One owner per file set.** Don't edit files under a crate another agent has an `[~]` task in without noting it in that task's notes.
-3. **Done means verified.** `[x]` only when code exists, `cargo test --workspace` passes, and the acceptance note is met. Write *how* it was verified in Notes. Never mark Windows-only behaviour done without running it on Windows.
+3. **Done means verified.** `[x]` only when code exists, the workspace builds clippy-clean, and the acceptance note is met by actually running it. Write *how* it was verified in Notes. Never mark Windows-only behaviour done without running it on Windows.
 4. **Keep it current.** Add newly discovered work as new tasks (next free ID in the section). Don't renumber. If scope changes, edit the task and say why in Notes.
 5. Update `README.md` feature table when a user-visible feature changes status.
+
+> **Testing deferred (2026-10-14):** no new tests, benchmarks or test infrastructure for now (see PLAN.md). Test-only tasks are marked `[-]`.
 
 Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why) · `[-]` dropped (say why)
 
@@ -26,12 +28,12 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-005 | [x] | claude | Config system: TOML files for server + agent, validated on load | `server.example.toml`, `agent.example.toml` |
 | T-006 | [x] | claude | Initial DB migrations (SQLite) | `apps/server/migrations/` |
 | T-007 | [x] | claude | AGENTS.md + CLAUDE.md shared conventions, LICENSE (Apache-2.0) | |
-| T-008 | [ ] | | GitHub Actions CI: fmt, clippy `-D warnings`, test, Windows build, Linux server build | `.github/workflows/ci.yml` |
+| T-008 | [ ] | | GitHub Actions CI: fmt, clippy `-D warnings`, Windows build, Linux server build (no test job while testing is deferred) | `.github/workflows/ci.yml` |
 | T-009 | [ ] | | `cargo deny` / `cargo audit` job + `deny.toml` license allowlist | §18 |
 | T-010 | [ ] | | Threat model doc `docs/security-model.md` | §12 |
 | T-011 | [ ] | | ADR folder `docs/adr/` + ADR-0001 (Iced), ADR-0002 (SQLite first, Postgres later), ADR-0003 (HTTP+JSON for phase 1 transport) | §20 |
 | T-012 | [ ] | | CONTRIBUTING.md, CODE_OF_CONDUCT.md, SECURITY.md, THIRD_PARTY_LICENSES generation | §18 |
-| T-013 | [ ] | | Remaining docs skeletons with real content: architecture, network-protocol, agent-design, server-deployment, development, testing, roadmap | §20 — only document what exists |
+| T-013 | [ ] | | Remaining docs skeletons with real content: architecture, network-protocol, agent-design, server-deployment, development, roadmap | §20 — only document what exists |
 
 ## Phase 1 — Vertical slice Agent → Server → Console (§16, §22 steps 3–6)
 
@@ -50,7 +52,7 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-109 | [ ] | | TLS (rustls) for server listener; refuse non-loopback plaintext unless `--insecure-dev` | §12.2 — **required before any non-dev use** |
 | T-110 | [ ] | | Append-only audit table + `GET /api/v1/audit` (enroll, token create, search by tech, device detail views) | §12 audit model |
 | T-111 | [ ] | | PostgreSQL backend (sqlx `postgres` feature, same migrations translated) | §13 |
-| T-112 | [ ] | | Search indexes + FTS (SQLite FTS5 / Postgres trigram) and benchmark harness with 10k generated devices, record P95 | §5 perf targets |
+| T-112 | [ ] | | Search indexes + FTS (SQLite FTS5 / Postgres trigram) | §5. Benchmark harness (10k devices, P95) deferred with testing |
 | T-113 | [ ] | | Server push to Console (SSE or WebSocket) for live device-state updates | "visible within a few seconds" |
 | T-114 | [ ] | | Event history table + `GET /api/v1/devices/{id}/events` | |
 | T-115 | [ ] | | Device decommission / re-enroll (revoke secret) API + CLI | §5 device identity |
@@ -102,8 +104,8 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | ID | Status | Owner | Task | Notes / acceptance |
 |---|---|---|---|---|
 | T-350 | [x] | claude | Server integration tests (enroll → events → search) in-process | `cargo test -p tervano-server` |
-| T-351 | [ ] | | End-to-end script: start server, create token, run agent, query via HTTP, assert device + user | dev script under `scripts/`. Done manually 2026-10-14 (claude): agent enrolled, search `q=nosh` returned this PC with correct IP/user; Console launched against it |
-| T-352 | [ ] | | Cache acceptance test from §17 (IP change reflected, no DC queries) | needs T-500 for DC part |
+| T-351 | [-] | | End-to-end script: start server, create token, run agent, query via HTTP, assert device + user | dev script under `scripts/`. Done manually 2026-10-14 (claude): agent enrolled, search `q=nosh` returned this PC with correct IP/user; Console launched against it. Script deferred with testing |
+| T-352 | [-] | | Cache acceptance test from §17 (IP change reflected, no DC queries) | deferred with testing |
 
 ## Phase 1b — Direct (serverless) management channel
 
@@ -134,7 +136,7 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-512 | [ ] | | Remote session audit records (start/end/duration/mode) | |
 | T-513 | [ ] | | Session recording (opt-in, disclosed) | |
 | T-514 | [ ] | | Secure desktop / UAC / lock screen behaviour documented honestly | |
-| T-515 | [ ] | | Remote-control acceptance test (§17) on a real Windows box | |
+| T-515 | [ ] | | Remote-control manual demo on a real Windows box (view, notification, input, disconnect, no lock/logoff) | required before marking remote control done; not an automated test |
 | T-516 | [ ] | | Optional encrypted relay via server | |
 
 ## Phase 3 — Active Directory (§8)
@@ -207,7 +209,7 @@ Each module: agent operation + authorization + audit + console tab. Build one fu
 | T-951 | [ ] | | WiX MSI: Agent (service, silent, signed enrollment config, GPO/Intune) | no shared secret in public MSI |
 | T-952 | [ ] | | Server packages: Windows service, systemd, container, backup docs | |
 | T-953 | [ ] | | Release workflow + version metadata + optional code signing | |
-| T-954 | [ ] | | Upgrade/uninstall tests | |
+| T-954 | [-] | | Upgrade/uninstall tests | deferred with testing |
 | T-955 | [ ] | | Accessibility pass (contrast, keyboard, screen reader) | |
 | T-956 | [ ] | | Security review + fuzzing protocol deserialization | §12 |
 | T-957 | [ ] | | Linux/macOS agent | parity matrix rows |
