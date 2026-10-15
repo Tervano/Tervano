@@ -33,7 +33,7 @@ Status: `[ ]` todo · `[~]` locked / in progress by the owner · `[x]` done · `
 | T-009 | [ ] | | `cargo deny` / `cargo audit` job + `deny.toml` license allowlist | §18 |
 | T-010 | [x] | codex | Threat model doc `docs/security-model.md` | §12. Verified 2026-10-15 against Server, Agent, Console, certificate, and migration code; checked 29 local doc links and 18 task references. Covers active trust boundaries, attacker capabilities, current controls, privacy, gaps, and gates for privileged operations; follow-ups T-121/T-122/T-219. Documentation has no runtime behavior. |
 | T-011 | [x] | codex | ADR folder `docs/adr/` + ADR-0001 (Iced), ADR-0002 (SQLite first, Postgres later), ADR-0003 (HTTP+JSON for phase 1 transport) | §20. Verified 2026-10-15 on Windows against PLAN, Cargo and current code; local links in README and all three ADRs resolve. Workspace build, existing tests, clippy, fmt clean. Documentation has no runtime path. |
-| T-012 | [ ] | | CONTRIBUTING.md, CODE_OF_CONDUCT.md, SECURITY.md, THIRD_PARTY_LICENSES generation | §18 |
+| T-012 | [~] | codex | CONTRIBUTING.md, CODE_OF_CONDUCT.md, SECURITY.md, THIRD_PARTY_LICENSES generation | §18 |
 | T-013 | [ ] | | Remaining docs skeletons with real content: architecture, network-protocol, agent-design, server-deployment, development, roadmap | §20 — only document what exists |
 
 ## Phase 1 — Vertical slice Agent → Server → Console (§16, §22 steps 3–6)
@@ -59,7 +59,7 @@ Status: `[ ]` todo · `[~]` locked / in progress by the owner · `[x]` done · `
 | T-115 | [ ] | | Device decommission / re-enroll (revoke secret) API + CLI | §5 device identity |
 | T-116 | [ ] | | Rate limiting / body size limits / reconnect-storm backpressure | §14 |
 | T-117 | [ ] | | Run as Windows service + systemd unit + Dockerfile | §15 |
-| T-118 | [ ] | | Metrics endpoint (OpenTelemetry/Prometheus) incl. event volume | §14 |
+| T-118 | [~] | codex | Metrics endpoint (OpenTelemetry/Prometheus) incl. event volume | §14 |
 | T-119 | [x] | codex | Record client IP in audit rows (`into_make_service_with_connect_info`) | Verified on Windows 2026-10-15: live loopback server audit API showed `127.0.0.1` for failed technician auth (401), rejected enrollment (403), successful enrollment (200); CLI event has null IP. `cargo build/test --workspace`, clippy `-D warnings`, fmt clean. Socket peer only; proxy deployments record proxy IP. |
 | T-120 | [x] | codex | Configurable event-history retention and purge | Verified 2026-10-15 on Windows: with 1-day retention, backdated one event 2 days in a scratch DB and restarted the live Server; history returned only the fresh event, and the retention index was present. Zero-day config was rejected before DB creation. Hourly schedule was inspected in code, not waited through. Workspace build, existing tests, clippy, fmt clean. |
 | T-121 | [ ] | | Audit retention, export, and protected archive policy | PLAN §12; append-only DB triggers prevent ordinary UPDATE/DELETE, but no retention/export workflow exists. Preserve integrity across archival. |
