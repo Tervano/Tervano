@@ -68,6 +68,13 @@ enum CertCmd {
         #[arg(long, default_value = "tls")]
         out: PathBuf,
     },
+    /// Issue a technician client certificate for direct (serverless) agent management.
+    Tech {
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = "tls")]
+        out: PathBuf,
+    },
 }
 
 fn load_config(path: &PathBuf) -> anyhow::Result<Config> {
@@ -96,11 +103,15 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let cli = Cli::parse();
-    if let Cmd::Cert {
-        cmd: CertCmd::Init { names, out },
-    } = &cli.cmd
-    {
-        return cert::init(out, names);
+    // Certificate commands need no config or database (usable in serverless deployments).
+    match &cli.cmd {
+        Cmd::Cert {
+            cmd: CertCmd::Init { names, out },
+        } => return cert::init(out, names),
+        Cmd::Cert {
+            cmd: CertCmd::Tech { name, out },
+        } => return cert::tech(out, name),
+        _ => {}
     }
     let cfg = load_config(&cli.config)?;
     let db = connect(&cfg.database_url).await?;

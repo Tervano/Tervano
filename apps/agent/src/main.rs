@@ -1,4 +1,5 @@
 mod collect;
+mod direct;
 mod secure;
 #[cfg(windows)]
 mod service;
@@ -12,7 +13,9 @@ use tokio::sync::watch;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    pub server_url: String,
+    /// Tervano Server to report to. Omit for serverless operation (direct management only).
+    #[serde(default)]
+    pub server_url: Option<String>,
     #[serde(default)]
     pub enrollment_token: String,
     #[serde(default = "default_state_dir")]
@@ -25,6 +28,9 @@ pub struct Config {
     /// The Windows certificate store is always trusted too.
     #[serde(default)]
     pub ca_cert: Option<PathBuf>,
+    /// Direct management listener. Omit to disable.
+    #[serde(default)]
+    pub direct: Option<direct::DirectConfig>,
 }
 
 fn default_poll() -> u64 {
@@ -47,9 +53,18 @@ impl Config {
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let cfg: Config =
             toml::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
+        if let Some(url) = &cfg.server_url {
+            anyhow::ensure!(
+                url_transport_ok(url),
+                "server_url must be https:// (plain http:// is only allowed to a loopback address)"
+            );
+        }
+        if let Some(d) = &cfg.direct {
+            d.validate()?;
+        }
         anyhow::ensure!(
-            url_transport_ok(&cfg.server_url),
-            "server_url must be https:// (plain http:// is only allowed to a loopback address)"
+            cfg.server_url.is_some() || cfg.direct.is_some(),
+            "nothing to do: set server_url and/or a [direct] section"
         );
         anyhow::ensure!(
             cfg.poll_secs >= 1 && cfg.heartbeat_secs >= cfg.poll_secs,
@@ -194,10 +209,33 @@ async fn sleep_or_stop(d: Duration, stop: &mut watch::Receiver<bool>) -> bool {
     }
 }
 
-/// Agent main loop: enroll if needed, then report state changes and heartbeats until `stop` fires.
-pub async fn run(cfg: Config, mut stop: watch::Receiver<bool>) -> anyhow::Result<()> {
-    let client = Client::new(&cfg.server_url, cfg.ca_cert.as_deref())?;
+/// Runs the configured roles (server reporting and/or direct management) until `stop` fires.
+/// A failure in either is fatal so misconfiguration is loud rather than half-working.
+pub async fn run(cfg: Config, stop: watch::Receiver<bool>) -> anyhow::Result<()> {
     std::fs::create_dir_all(&cfg.state_dir)?;
+    let direct = async {
+        match &cfg.direct {
+            Some(d) => direct::serve(d.clone(), cfg.state_dir.clone(), stop.clone()).await,
+            None => Ok(()),
+        }
+    };
+    let reporting = async {
+        match &cfg.server_url {
+            Some(url) => report(&cfg, url, stop.clone()).await,
+            None => Ok(()),
+        }
+    };
+    tokio::try_join!(direct, reporting)?;
+    Ok(())
+}
+
+/// Reporting loop: enroll if needed, then report state changes and heartbeats until `stop` fires.
+async fn report(
+    cfg: &Config,
+    server_url: &str,
+    mut stop: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let client = Client::new(server_url, cfg.ca_cert.as_deref())?;
     let id_path = cfg.state_dir.join("identity.json");
     let poll = Duration::from_secs(cfg.poll_secs);
     let max_backoff = Duration::from_secs(300);
@@ -233,7 +271,7 @@ pub async fn run(cfg: Config, mut stop: watch::Receiver<bool>) -> anyhow::Result
             }
         }
     };
-    tracing::info!(device = %identity.device_id, server = %cfg.server_url, "agent running");
+    tracing::info!(device = %identity.device_id, server = %server_url, "reporting to server");
 
     // Seeded from the clock so a restarted agent never reuses a seq; corrected from the server's ack.
     let mut seq = now_millis() as u64;
@@ -341,6 +379,7 @@ const USAGE: &str = "\
 usage: TervanoAgent <command>
   run [config]                 run in the foreground (default config: agent.toml)
   collect                      print the state this agent would report, as JSON
+  direct-fingerprint [config]  print the SHA-256 fingerprint consoles pin for direct management
   service install [config]     install the Windows service (admin; default config: %ProgramData%\\Tervano\\Agent\\agent.toml)
   service uninstall            remove the Windows service (admin)";
 
@@ -362,6 +401,23 @@ fn main() -> anyhow::Result<()> {
                 });
                 run(cfg, rx).await
             })
+        }
+        ["direct-fingerprint", rest @ ..] => {
+            let cfg = Config::load(std::path::Path::new(
+                rest.first().copied().unwrap_or("agent.toml"),
+            ))?;
+            let path = cfg.state_dir.join("direct-cert.pem");
+            let der = {
+                use rustls::pki_types::{CertificateDer, pem::PemObject};
+                CertificateDer::from_pem_file(&path).with_context(|| {
+                    format!(
+                        "{} missing: start the agent with [direct] once",
+                        path.display()
+                    )
+                })?
+            };
+            println!("{}", direct::fingerprint(&der));
+            Ok(())
         }
         ["collect"] => {
             println!(

@@ -4510,19 +4510,28 @@ name = "tervano-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
+ "axum-server",
+ "futures-util",
  "hex",
  "if-addrs",
+ "rcgen",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "tervano-protocol",
  "tokio",
+ "tokio-rustls",
  "toml",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "uuid",
  "windows 0.62.2",
  "windows-service",
+ "x509-parser",
 ]
 
 [[package]]

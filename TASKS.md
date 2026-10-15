@@ -98,7 +98,7 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-308 | [ ] | | Keyboard-first: Ctrl+K focus search, arrows/Enter in results, command palette | §11 |
 | T-309 | [ ] | | Recent devices, favorites, search history | §11 |
 | T-310 | [x] | claude | Console live updates: SSE subscription with reconnect backoff (1→30 s), 45 s dead-connection timeout, 1 s debounced refresh; 15 s polling only while disconnected; status line shows live/polling | Verified 2026-10-15: Console logged both pushes within ~1 s; server restart → reconnected in 3 s. Visual status text not checked by eye. Shortcut: refresh re-runs whole search (T-307) |
-| T-311 | [ ] | | Serverless mode: manual endpoint list + direct agent query (needs T-400) | §2A, §22 |
+| T-311 | [ ] | | Serverless mode in Console: manual endpoint list, technician cert + key settings, pin agent fingerprint (TOFU with explicit confirm), call agent `GET /v1/device` | §2A, §22. Agent side done (T-400/T-401) |
 | T-312 | [ ] | | Tabs / multi-window device admin | §11 |
 | T-313 | [ ] | | Real screenshots into README | §19H |
 
@@ -113,9 +113,9 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 
 | ID | Status | Owner | Task | Notes / acceptance |
 |---|---|---|---|---|
-| T-400 | [~] | claude | Agent direct listener (TLS, mutual auth) exposing device info | §2A serverless, §6 transport |
-| T-401 | [~] | claude | Authorization model for direct connections (tech cert / Kerberos; IP knowledge ≠ permission) | §12 |
-| T-402 | [ ] | | Agent-side per-operation authorization checks | §12.9 |
+| T-400 | [x] | claude | Agent direct listener: HTTPS (rustls) on `[direct].listen`, mandatory client certs, `GET /v1/device`; agent self-generated cert (key DPAPI-protected), `TervanoAgent direct-fingerprint` for pinning; `server_url` now optional (serverless agent) | Verified 2026-10-15 on Win 11 25H2 with a Python client pinning the fingerprint: alice→200, no protocol header→400; identity stable across restarts; server+direct combined mode OK. Console client is T-311 |
+| T-401 | [x] | claude | Direct authz: technician client certs from the org CA (`tervano-server cert tech --name`, ClientAuth EKU, CN = technician), optional `allowed_technicians`, every decision logged by the agent | Verified: bob (valid cert, not allowed)→403; no cert, rogue-CA cert, server cert as client → rejected in TLS handshake. Gaps: no CRL (revoke via allowlist + 1-year expiry), Kerberos option not done |
+| T-402 | [ ] | | Agent-side per-operation authorization checks | §12.9. Hook exists: `direct::authorize(cfg, tech, Op)`; today one allowlist covers all ops — needs per-op roles (with T-806) as operations are added |
 | T-403 | [ ] | | Server connection-authorization tickets (short-lived, signed) agents can verify offline | §2C non-negotiable outage behaviour |
 | T-404 | [ ] | | QUIC transport (quinn) with TCP/TLS fallback | §6 |
 

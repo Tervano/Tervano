@@ -10,3 +10,12 @@ enrollment_token = ""
 # How often local state is checked for changes, and how often a heartbeat is sent when nothing changed.
 poll_secs = 15
 heartbeat_secs = 60
+
+# Direct (serverless) management. Technicians connect straight to this agent with a client
+# certificate from `tervano-server cert tech --name <tech>`; the agent's own certificate is
+# generated on first start — pin it with `TervanoAgent direct-fingerprint`. Omit server_url
+# above to run without a server at all.
+# [direct]
+# listen = "0.0.0.0:8472"
+# technician_ca = 'C:\ProgramData\Tervano\Agent\ca.pem'
+# allowed_technicians = ["alice", "bob"]   # empty or omitted = any certificate from technician_ca

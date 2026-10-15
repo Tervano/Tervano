@@ -44,6 +44,7 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Discovery | Find computers by logged-in user | Implemented | Windows | From real agent session data, not AD attributes |
 | Console | Search, device list, device details | Implemented | Windows | Loading / empty / error states |
 | Console | Live device updates | Implemented | Windows | Server push (SSE): logons, IP changes, online/offline appear within seconds; falls back to 15 s polling when the stream is down |
+| Agent | Direct (serverless) management listener | Partial | Windows | mTLS: technician client certs from the org CA, per-technician allowlist, agent cert pinned by fingerprint. Only device info is exposed so far; no Console client yet (T-311) |
 | Console | Serverless mode | Planned | Windows | T-311 |
 | Directory | Active Directory browsing | Planned | Windows | T-600+ |
 | Remote | Screen viewing / remote input / user notification | Planned | Windows | T-500+ |
@@ -101,7 +102,9 @@ tervano-server cert init --name tervano.corp.example --name 10.0.0.5   # writes 
 
 Set `listen`, `tls_cert = 'tls/server.pem'`, `tls_key = 'tls/server-key.pem'` in `server.toml` ([example](apps/server/server.example.toml)), copy `tls/ca.pem` to endpoints and set `ca_cert` in `agent.toml` and the Console's Settings. Keep `tls/ca-key.pem` private; re-run `cert init` to rotate the server cert under the same CA. With an enterprise PKI, use your own certificate and skip `ca_cert` (the Windows certificate store is trusted). Note: Windows `curl` (Schannel) needs `--ssl-no-revoke` with the private CA because it has no CRL.
 
-**Firewall:** agents need outbound TCP to the server port (default 8470).
+**Serverless / direct management:** an agent can run with no server at all. Issue technician certificates from the CA (`tervano-server cert tech --name alice` — the server binary works as a pure CLI here, no database needed), copy `ca.pem` to endpoints, and add a `[direct]` section to `agent.toml` (see [agent.example.toml](apps/agent/agent.example.toml)). Knowing an agent's address grants nothing: a CA-issued client certificate is required and checked against `allowed_technicians`. Consoles pin the agent's certificate using `TervanoAgent direct-fingerprint`. The Console UI for this is not built yet (T-311).
+
+**Firewall:** agents need outbound TCP to the server port (default 8470), and inbound TCP on the direct port (e.g. 8472) only if `[direct]` is enabled.
 
 Installers (MSI) and Linux/container server packaging are planned (T-950–T-952, T-117).
 
@@ -114,7 +117,7 @@ See [AGENTS.md](AGENTS.md) for layout, conventions and the commands that must pa
 Phases from [PLAN.md](PLAN.md) §16, tracked in detail in [TASKS.md](TASKS.md):
 
 - [x] Phase 0 — workspace, protocol, config, migrations (CI and docs still open)
-- [ ] Phase 1 — Agent → Server → Console slice (core, TLS, audit, DPAPI, live updates done; serverless open)
+- [ ] Phase 1 — Agent → Server → Console slice (core, TLS, audit, DPAPI, live updates, agent direct listener done; serverless Console open)
 - [ ] Phase 2 — Remote control
 - [ ] Phase 3 — Active Directory
 - [ ] Phase 4 — Background administration
