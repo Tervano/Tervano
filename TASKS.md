@@ -179,12 +179,12 @@ Each module: agent operation + authorization + audit + console tab. Build one fu
 | T-708 | [ ] | | Interactive remote terminal | |
 | T-709 | [!] | claude | Silent software install/uninstall over the direct channel: uninstall by inventory entry (MSI product code → `msiexec /x {code} /qn /norestart`, else the vendor's QuietUninstallString), install a local `.msi` (`msiexec /i … /qn /norestart`), run as tracked command jobs (30 min timeout, tree kill), operator-only, logged; Console Software tab: Uninstall per row, MSI path + Install, msiexec exit codes explained | **Blocked on an elevated test machine** with a throwaway MSI: a successful install/uninstall has not been run (it needs admin, and real software on the dev PC must not be removed). Verified 2026-10-15 as a normal user: non-operator 403; per-user entries, unknown/invalid keys, non-MSI, missing and `%` paths refused; a corrupt .msi ran through msiexec and returned 1620. MSIX not supported yet |
 | T-710 | [x] | claude | Printers (spooler: name, driver, port, share, location, shared/network, decoded status, queued jobs) and mapped network drives of every signed-in user (from their loaded registry hive) over the direct channel; Console Direct → Printers & drives tab. WMI/CIM browser split to T-726 | Verified 2026-10-15 on Win 11 25H2 as a normal user: 4 printers identical to `Get-Printer`; a temporary HKCU\Network mapping was reported with user, letter, path and alternate account, then removed. As SYSTEM the spooler lists machine printers; per-user printer connections need the user context (T-725). Read-only: printer/drive changes not implemented |
-| T-711 | [ ] | | Patch status / Windows Update | parity matrix row |
+| T-711 | [~] | claude | Patch status / Windows Update | parity matrix row |
 | T-712 | [ ] | | Remote chat with end user | parity matrix row |
 | T-723 | [ ] | | BitLocker status and battery wear (design/full capacity) for hardware inventory | needs admin or WMI (`Win32_EncryptableVolume`, `root\wmi BatteryFullChargedCapacity`); verify on an elevated agent and a laptop |
 | T-724 | [ ] | | Server inventory snapshots: agent sends hardware inventory on startup and daily (not per heartbeat), server stores latest + history, Console server-mode Hardware view | PLAN §13 inventory snapshots; touches server schema — coordinate with Codex's server tasks |
 | T-725 | [ ] | | Run remote commands in the signed-in user's context (via session helper T-500), with clear labelling in the Console | PLAN §7 execution contexts |
-| T-726 | [ ] | | WMI/CIM browser: namespaces, classes, instances, ad-hoc WQL query (read-only first) | parity matrix row \"WMI/CIM management\"; needs COM (evaluate the `wmi` crate) |
+| T-726 | [~] | claude | WMI/CIM browser: namespaces, classes, instances, ad-hoc WQL query (read-only first) | parity matrix row \"WMI/CIM management\"; needs COM (evaluate the `wmi` crate) |
 
 ## Phase 5 — Automation & enterprise (§9)
 
