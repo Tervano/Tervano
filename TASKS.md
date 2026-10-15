@@ -28,7 +28,7 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-005 | [x] | claude | Config system: TOML files for server + agent, validated on load | `server.example.toml`, `agent.example.toml` |
 | T-006 | [x] | claude | Initial DB migrations (SQLite) | `apps/server/migrations/` |
 | T-007 | [x] | claude | AGENTS.md + CLAUDE.md shared conventions, LICENSE (Apache-2.0) | |
-| T-008 | [ ] | | GitHub Actions CI: fmt, clippy `-D warnings`, Windows build, Linux server build (no test job while testing is deferred) | `.github/workflows/ci.yml` |
+| T-008 | [~] | claude | GitHub Actions CI: fmt, clippy `-D warnings`, Windows build, Linux server build (no test job while testing is deferred) | `.github/workflows/ci.yml` |
 | T-009 | [ ] | | `cargo deny` / `cargo audit` job + `deny.toml` license allowlist | §18 |
 | T-010 | [ ] | | Threat model doc `docs/security-model.md` | §12 |
 | T-011 | [ ] | | ADR folder `docs/adr/` + ADR-0001 (Iced), ADR-0002 (SQLite first, Postgres later), ADR-0003 (HTTP+JSON for phase 1 transport) | §20 |
