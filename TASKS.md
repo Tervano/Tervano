@@ -54,12 +54,13 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-111 | [ ] | | PostgreSQL backend (sqlx `postgres` feature, same migrations translated) | §13 |
 | T-112 | [ ] | | Search indexes + FTS (SQLite FTS5 / Postgres trigram) | §5. Benchmark harness (10k devices, P95) deferred with testing |
 | T-113 | [x] | claude | Server push: SSE `GET /api/v1/stream` (`device` {id} / `resync` on lag), bounded broadcast (1024), 5 s offline sweeper announces timeouts | Verified 2026-10-15 over TLS with curl: event on agent start, event ~10 s after agent killed (sweeper), `:` keep-alives every 15 s. Shortcut: all techs see all device ids until RBAC (T-806) |
-| T-114 | [~] | codex | Event history table + `GET /api/v1/devices/{id}/events` | |
+| T-114 | [x] | codex | Event history table + `GET /api/v1/devices/{id}/events` | Verified 2026-10-15 on Windows with a live server and existing DB migration: startup/state/shutdown returned newest first (seq 4,3,1); heartbeat omitted; `limit=2`/`before=3` paginated; replay did not duplicate; unauthorized→401, unknown device→404, oversized seq→400. Existing workspace tests, build, clippy, fmt clean. New events only; retention is T-120. |
 | T-115 | [ ] | | Device decommission / re-enroll (revoke secret) API + CLI | §5 device identity |
 | T-116 | [ ] | | Rate limiting / body size limits / reconnect-storm backpressure | §14 |
 | T-117 | [ ] | | Run as Windows service + systemd unit + Dockerfile | §15 |
 | T-118 | [ ] | | Metrics endpoint (OpenTelemetry/Prometheus) incl. event volume | §14 |
 | T-119 | [x] | codex | Record client IP in audit rows (`into_make_service_with_connect_info`) | Verified on Windows 2026-10-15: live loopback server audit API showed `127.0.0.1` for failed technician auth (401), rejected enrollment (403), successful enrollment (200); CLI event has null IP. `cargo build/test --workspace`, clippy `-D warnings`, fmt clean. Socket peer only; proxy deployments record proxy IP. |
+| T-120 | [ ] | | Configurable event-history retention and purge | T-114 stores full state snapshots for accepted changes; without retention the table grows indefinitely. Include privacy and capacity controls. |
 
 ### Agent
 | ID | Status | Owner | Task | Notes / acceptance |

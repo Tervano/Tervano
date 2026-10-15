@@ -181,6 +181,7 @@ pub fn app(state: AppState) -> Router {
         .route("/events", post(ingest_events))
         .route("/devices", get(search_devices))
         .route("/devices/{id}", get(device_details))
+        .route("/devices/{id}/events", get(device_events))
         .route("/audit", get(list_audit))
         .route("/stream", get(stream_changes))
         .layer(middleware::from_fn(require_protocol))
@@ -464,12 +465,23 @@ async fn ingest_events(
     let was_offline = prev_seen <= now - s.offline_after_ms;
     let mut changed = false;
     for ev in events {
-        let seq = ev.seq as i64;
+        let seq = i64::try_from(ev.seq)
+            .map_err(|_| AppError(err(StatusCode::BAD_REQUEST, "event seq exceeds maximum")))?;
         if seq <= last_seq {
             continue;
         }
         last_seq = seq;
         changed |= was_offline || !matches!(ev.kind, EventKind::Heartbeat);
+        if !matches!(ev.kind, EventKind::Heartbeat) {
+            // shortcut: state snapshots accumulate until configurable retention is added (T-120).
+            sqlx::query("INSERT INTO device_events (device_id, seq, received_at, event_json) VALUES (?, ?, ?, ?)")
+                .bind(&dev.id)
+                .bind(seq)
+                .bind(now)
+                .bind(serde_json::to_string(&ev).expect("event serializes"))
+                .execute(&mut *tx)
+                .await?;
+        }
         match &ev.kind {
             EventKind::Startup { state } | EventKind::StateChanged { state } => {
                 sqlx::query("UPDATE devices SET hostname = ?, os = ?, state_json = ? WHERE id = ?")
@@ -670,6 +682,56 @@ async fn device_details(
         last_seen,
         state,
     }))
+}
+
+#[derive(Deserialize)]
+struct EventHistoryParams {
+    /// Return events with seq < before (newest first).
+    before: Option<i64>,
+    #[serde(default = "default_limit")]
+    limit: u32,
+}
+
+async fn device_events(
+    State(s): State<AppState>,
+    _tech: TechAuth,
+    Path(id): Path<Uuid>,
+    Query(p): Query<EventHistoryParams>,
+) -> Result<Json<Vec<DeviceEventRecord>>, AppError> {
+    let device_id = id.to_string();
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM devices WHERE id = ? AND revoked = 0)")
+            .bind(&device_id)
+            .fetch_one(&s.db)
+            .await?;
+    if !exists {
+        return Err(AppError(err(StatusCode::NOT_FOUND, "device not found")));
+    }
+    let before = p.before.map_or(i64::MAX, |seq| seq.saturating_sub(1));
+    let rows = sqlx::query(
+        "SELECT received_at, event_json FROM device_events
+         WHERE device_id = ? AND seq <= ? ORDER BY seq DESC LIMIT ?",
+    )
+    .bind(device_id)
+    .bind(before)
+    .bind(p.limit.clamp(1, 100) as i64)
+    .fetch_all(&s.db)
+    .await?;
+    let mut events = Vec::with_capacity(rows.len());
+    for row in rows {
+        let event = serde_json::from_str(row.get("event_json")).map_err(|e| {
+            tracing::error!(device = %id, "corrupt device event: {e}");
+            AppError(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "corrupt device event",
+            ))
+        })?;
+        events.push(DeviceEventRecord {
+            received_at: row.get("received_at"),
+            event,
+        });
+    }
+    Ok(Json(events))
 }
 
 #[cfg(test)]

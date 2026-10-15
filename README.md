@@ -40,6 +40,7 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Agent | Change detection | Partial | Windows | Poll-and-diff every `poll_secs`; event-driven notifications are T-209/T-210 |
 | Server | Device index + search | Implemented | Win/Linux | Prefix search by hostname, username, `DOMAIN\user`, IP. Tests: [api.rs](apps/server/tests/api.rs). Not yet benchmarked (T-112) |
 | Server | Online/offline tracking | Implemented | Win/Linux | Heartbeat timeout + immediate offline on agent shutdown |
+| Server | Device event history | Implemented | Win/Linux | Authenticated `GET /api/v1/devices/{id}/events`, newest first with `before` and `limit` (max 100). New startup/state/shutdown events only; heartbeat excluded. Retention pending (T-120) |
 | Discovery | Find computers by hostname | Implemented | Windows | Via server |
 | Discovery | Find computers by logged-in user | Implemented | Windows | From real agent session data, not AD attributes |
 | Console | Search, device list, device details | Implemented | Windows | Loading / empty / error states |

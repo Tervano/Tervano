@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.1";
+pub const PROTOCOL_VERSION: &str = "1.2";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -131,6 +131,14 @@ pub struct AgentEvent {
 pub struct EventAck {
     /// Highest seq the server has applied for this device.
     pub last_seq: u64,
+}
+
+/// An accepted device event, ordered by sequence number in the history API.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceEventRecord {
+    /// Server receipt time; `event.at` is supplied by the agent.
+    pub received_at: Millis,
+    pub event: AgentEvent,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
