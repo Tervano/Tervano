@@ -168,6 +168,56 @@ enum Message {
     CmdPoll,
     CmdStop,
     CmdStopped(Result<(), String>),
+    FilesInput(String),
+    FilesGo,
+    FilesUp,
+    FilesDrives,
+    FilesOpen(String),
+    FilesLoaded(String, Result<DirListing, String>),
+    FilesDownload(String),
+    FilesUploadPath(String),
+    FilesOverwrite(bool),
+    FilesUpload,
+    FilesTransferDone(Result<String, String>),
+    FilesNewFolder(String),
+    FilesMkdir,
+    FilesRenameStart(String),
+    FilesRenameInput(String),
+    FilesRenameApply,
+    FilesAskDelete(String, bool),
+    FilesRecursive(bool),
+    FilesConfirm,
+    FilesCancel,
+    FilesOpDone(Result<String, String>),
+}
+
+/// Joins a remote Windows directory and a name (`""` + `C:\` = `C:\`).
+fn win_join(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{}\\{name}", dir.trim_end_matches('\\'))
+    }
+}
+
+/// Parent of a remote Windows path; the parent of a drive root is the drive list (`""`).
+fn win_parent(p: &str) -> String {
+    let t = p.trim_end_matches('\\');
+    match t.rsplit_once('\\') {
+        // "C:\Users" -> "C:\" ; "C:\Users\x" -> "C:\Users"
+        Some((head, _)) if head.ends_with(':') => format!("{head}\\"),
+        Some((head, _)) => head.to_owned(),
+        None => String::new(),
+    }
+}
+
+fn human_size(b: u64) -> String {
+    match b {
+        0..1024 => format!("{b} B"),
+        1024..1_048_576 => format!("{:.1} KB", b as f64 / 1024.0),
+        1_048_576..1_073_741_824 => format!("{:.1} MB", b as f64 / 1_048_576.0),
+        _ => format!("{:.2} GB", b as f64 / 1_073_741_824.0),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -450,6 +500,7 @@ enum DirectTab {
     Software,
     Registry,
     Commands,
+    Files,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -535,6 +586,19 @@ struct Console {
     /// The command started from this Console on the selected endpoint, with its address.
     cmd_job: Option<(String, ExecStatus)>,
     cmd_notice: Option<String>,
+    files_path: String,
+    files_input: String,
+    files: Option<(String, Result<DirListing, String>)>,
+    /// What a running transfer is doing; transfers are one at a time.
+    files_busy: Option<String>,
+    files_notice: Option<Result<String, String>>,
+    files_upload_path: String,
+    files_overwrite: bool,
+    files_new_folder: String,
+    /// (entry name, new name) while renaming inline.
+    files_rename: Option<(String, String)>,
+    files_recursive: bool,
+    files_confirm: Option<FileOp>,
 }
 
 impl Console {
@@ -606,6 +670,17 @@ impl Console {
             cmd_confirm: false,
             cmd_job: None,
             cmd_notice: None,
+            files_path: String::new(),
+            files_input: String::new(),
+            files: None,
+            files_busy: None,
+            files_notice: None,
+            files_upload_path: String::new(),
+            files_overwrite: false,
+            files_new_folder: String::new(),
+            files_rename: None,
+            files_recursive: false,
+            files_confirm: None,
         };
         let task = if configured { c.search() } else { Task::none() };
         (c, task)
@@ -700,6 +775,11 @@ impl Console {
             }),
             // Commands are run on demand; nothing to refresh on the 15 s tick.
             DirectTab::Commands => Task::none(),
+            DirectTab::Files => {
+                Task::perform(direct::files_list(t, self.files_path.clone()), move |r| {
+                    Message::FilesLoaded(addr.clone(), r)
+                })
+            }
         };
         Task::batch([device, tab])
     }
@@ -832,6 +912,12 @@ impl Console {
                     self.reg_notice = None;
                     self.cmd_confirm = false;
                     self.cmd_notice = None;
+                    self.files = None;
+                    self.files_path.clear();
+                    self.files_input.clear();
+                    self.files_notice = None;
+                    self.files_confirm = None;
+                    self.files_rename = None;
                     // A running command keeps its job; it belongs to the endpoint it ran on.
                     if self.cmd_job.as_ref().is_some_and(|(a, _)| a != &address) {
                         self.cmd_job = None;
@@ -1139,6 +1225,113 @@ impl Console {
             Message::CmdStopped(r) => {
                 if let Err(e) = r {
                     self.cmd_notice = Some(e);
+                }
+            }
+            Message::FilesInput(s) => self.files_input = s,
+            Message::FilesGo => {
+                let p = self.files_input.trim().to_owned();
+                return self.files_navigate(p);
+            }
+            Message::FilesUp => return self.files_navigate(win_parent(&self.files_path)),
+            Message::FilesDrives => return self.files_navigate(String::new()),
+            Message::FilesOpen(name) => {
+                let p = win_join(&self.files_path, &name);
+                return self.files_navigate(p);
+            }
+            Message::FilesLoaded(address, r) => {
+                if self.direct_selected.as_deref() == Some(address.as_str()) {
+                    self.files = Some((address, r));
+                }
+            }
+            Message::FilesDownload(name) => {
+                if let (Some(t), Some(dir)) = (
+                    self.direct_selected.as_deref().and_then(|a| self.target(a)),
+                    downloads_dir(),
+                ) {
+                    self.files_busy = Some(format!("Downloading {name}…"));
+                    self.files_notice = None;
+                    let remote = win_join(&self.files_path, &name);
+                    return Task::perform(
+                        direct::download(t, remote, dir),
+                        Message::FilesTransferDone,
+                    );
+                }
+            }
+            Message::FilesUploadPath(p) => self.files_upload_path = p,
+            Message::FilesOverwrite(b) => self.files_overwrite = b,
+            Message::FilesUpload => {
+                let local =
+                    std::path::PathBuf::from(self.files_upload_path.trim().trim_matches('"'));
+                let Some(name) = local.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                    self.files_notice =
+                        Some(Err("Enter the full path of a local file to upload.".into()));
+                    return Task::none();
+                };
+                if self.files_path.is_empty() {
+                    self.files_notice = Some(Err("Open a folder on the agent first.".into()));
+                    return Task::none();
+                }
+                if let Some(t) = self.direct_selected.as_deref().and_then(|a| self.target(a)) {
+                    self.files_busy = Some(format!("Uploading {name}…"));
+                    self.files_notice = None;
+                    let remote = win_join(&self.files_path, &name);
+                    return Task::perform(
+                        direct::upload(t, local, remote, self.files_overwrite),
+                        Message::FilesTransferDone,
+                    );
+                }
+            }
+            Message::FilesTransferDone(r) => {
+                self.files_busy = None;
+                self.files_notice = Some(r);
+                if let Some(addr) = self.direct_selected.clone() {
+                    return self.load_direct(&addr);
+                }
+            }
+            Message::FilesNewFolder(n) => self.files_new_folder = n,
+            Message::FilesMkdir => {
+                let name = self.files_new_folder.trim().to_owned();
+                if !name.is_empty() && !self.files_path.is_empty() {
+                    let path = win_join(&self.files_path, &name);
+                    self.files_new_folder.clear();
+                    return self.files_run(FileOp::Mkdir { path });
+                }
+            }
+            Message::FilesRenameStart(name) => self.files_rename = Some((name.clone(), name)),
+            Message::FilesRenameInput(n) => {
+                if let Some((_, new)) = &mut self.files_rename {
+                    *new = n;
+                }
+            }
+            Message::FilesRenameApply => {
+                if let Some((old, new)) = self.files_rename.take()
+                    && !new.trim().is_empty()
+                    && new != old
+                {
+                    return self.files_run(FileOp::Rename {
+                        from: win_join(&self.files_path, &old),
+                        to: win_join(&self.files_path, new.trim()),
+                    });
+                }
+            }
+            Message::FilesAskDelete(name, is_dir) => {
+                self.files_notice = None;
+                self.files_confirm = Some(FileOp::Delete {
+                    path: win_join(&self.files_path, &name),
+                    recursive: is_dir && self.files_recursive,
+                });
+            }
+            Message::FilesRecursive(b) => self.files_recursive = b,
+            Message::FilesCancel => self.files_confirm = None,
+            Message::FilesConfirm => {
+                if let Some(op) = self.files_confirm.take() {
+                    return self.files_run(op);
+                }
+            }
+            Message::FilesOpDone(r) => {
+                self.files_notice = Some(r);
+                if let Some(addr) = self.direct_selected.clone() {
+                    return self.load_direct(&addr);
                 }
             }
             Message::KillDone(r) => {
@@ -1531,6 +1724,7 @@ impl Console {
                             DirectTab::Software => self.sw_view(),
                             DirectTab::Registry => self.reg_view(),
                             DirectTab::Commands => self.cmd_view(),
+                            DirectTab::Files => self.files_view(),
                         };
                         column![
                             row![
@@ -1541,7 +1735,8 @@ impl Console {
                                 tab("Hardware", DirectTab::Hardware),
                                 tab("Software", DirectTab::Software),
                                 tab("Registry", DirectTab::Registry),
-                                tab("Commands", DirectTab::Commands)
+                                tab("Commands", DirectTab::Commands),
+                                tab("Files", DirectTab::Files)
                             ]
                             .spacing(6),
                             body
@@ -1568,6 +1763,212 @@ impl Console {
             }
         };
         column![top, content].spacing(12).into()
+    }
+
+    fn files_navigate(&mut self, path: String) -> Task<Message> {
+        self.files_path = path;
+        self.files_input = self.files_path.clone();
+        self.files = None;
+        self.files_rename = None;
+        self.files_confirm = None;
+        match self.direct_selected.clone() {
+            Some(addr) => self.load_direct(&addr),
+            None => Task::none(),
+        }
+    }
+
+    fn files_run(&mut self, op: FileOp) -> Task<Message> {
+        let Some(t) = self.direct_selected.as_deref().and_then(|a| self.target(a)) else {
+            return Task::none();
+        };
+        let done = match &op {
+            FileOp::Rename { from, to } => format!("Renamed {from} to {to}."),
+            FileOp::Copy { from, to } => format!("Copied {from} to {to}."),
+            FileOp::Delete { path, .. } => format!("Deleted {path}."),
+            FileOp::Mkdir { path } => format!("Created {path}."),
+        };
+        Task::perform(direct::files_op(t, op), move |r| {
+            Message::FilesOpDone(r.map(|()| done.clone()))
+        })
+    }
+
+    fn files_view(&self) -> Element<'_, Message> {
+        let busy = self.files_busy.is_some();
+        let nav = row![
+            button(text("Drives"))
+                .style(button::secondary)
+                .on_press(Message::FilesDrives),
+            button(text("Up"))
+                .style(button::secondary)
+                .on_press_maybe((!self.files_path.is_empty()).then_some(Message::FilesUp)),
+            text_input(r"C:\Users\Public", &self.files_input)
+                .on_input(Message::FilesInput)
+                .on_submit(Message::FilesGo)
+                .padding(6),
+            button(text("Go"))
+                .style(button::secondary)
+                .on_press(Message::FilesGo),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        let mut col = column![
+            text("Downloads land in your Downloads folder and are SHA-256 verified. Reading or changing files requires operator rights on the agent.")
+                .size(12)
+                .style(text::secondary),
+            nav
+        ]
+        .spacing(8);
+        if !self.files_path.is_empty() {
+            col = col.push(
+                row![
+                    text_input(
+                        r"Local file to upload, e.g. C:\Tools\fix.ps1",
+                        &self.files_upload_path
+                    )
+                    .on_input(Message::FilesUploadPath)
+                    .on_submit(Message::FilesUpload)
+                    .padding(6),
+                    checkbox(self.files_overwrite)
+                        .label("overwrite")
+                        .on_toggle(Message::FilesOverwrite),
+                    button(text("Upload here"))
+                        .style(button::primary)
+                        .on_press_maybe((!busy).then_some(Message::FilesUpload)),
+                    text_input("New folder name", &self.files_new_folder)
+                        .on_input(Message::FilesNewFolder)
+                        .on_submit(Message::FilesMkdir)
+                        .padding(6)
+                        .width(160),
+                    button(text("Create"))
+                        .style(button::secondary)
+                        .on_press(Message::FilesMkdir),
+                    checkbox(self.files_recursive)
+                        .label("delete folders with contents")
+                        .on_toggle(Message::FilesRecursive),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            );
+        }
+        if let Some(op) = &self.files_confirm {
+            let what = match op {
+                FileOp::Delete {
+                    path,
+                    recursive: true,
+                } => format!("Delete {path} and everything in it?"),
+                FileOp::Delete { path, .. } => format!("Delete {path}?"),
+                _ => "Apply this change?".into(),
+            };
+            col = col.push(
+                container(
+                    column![
+                        text(what),
+                        row![
+                            button(text("Delete"))
+                                .style(button::danger)
+                                .on_press(Message::FilesConfirm),
+                            button(text("Cancel"))
+                                .style(button::secondary)
+                                .on_press(Message::FilesCancel),
+                        ]
+                        .spacing(8),
+                    ]
+                    .spacing(8),
+                )
+                .padding(10)
+                .width(Length::Fill)
+                .style(container::bordered_box),
+            );
+        }
+        if let Some(b) = &self.files_busy {
+            col = col.push(text(b.clone()).size(13).style(text::secondary));
+        }
+        if let Some(n) = &self.files_notice {
+            col = col.push(match n {
+                Ok(m) => text(m.clone()).size(13).style(text::success),
+                Err(e) => text(e.clone()).size(13).style(text::danger),
+            });
+        }
+        let listing = match &self.files {
+            None => return col.push(centered("Listing…")).into(),
+            Some((_, Err(e))) => return col.push(error_box(e)).into(),
+            Some((_, Ok(l))) => l,
+        };
+        let drives = listing.path.is_empty();
+        // shortcut: renders every entry; folders with tens of thousands of files need T-307.
+        let rows = listing.entries.iter().map(|e| {
+            let name: Element<_> = match &self.files_rename {
+                Some((old, new)) if old == &e.name => row![
+                    text_input("New name", new)
+                        .on_input(Message::FilesRenameInput)
+                        .on_submit(Message::FilesRenameApply)
+                        .padding(4),
+                    button(text("Save").size(12))
+                        .style(button::primary)
+                        .on_press(Message::FilesRenameApply),
+                ]
+                .spacing(4)
+                .into(),
+                _ if e.is_dir => button(text(format!("📁 {}", e.name)).size(13))
+                    .style(button::text)
+                    .padding([2, 4])
+                    .on_press(Message::FilesOpen(e.name.clone()))
+                    .into(),
+                _ => text(format!("📄 {}", e.name)).size(13).into(),
+            };
+            let mut r = row![
+                container(name).width(Length::FillPortion(5)),
+                text(if e.is_dir {
+                    String::new()
+                } else {
+                    human_size(e.size)
+                })
+                .size(12)
+                .width(Length::FillPortion(1)),
+                text(e.modified.map(ago).unwrap_or_default())
+                    .size(12)
+                    .width(Length::FillPortion(1)),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center);
+            if !drives {
+                if !e.is_dir {
+                    r = r.push(
+                        button(text("Download").size(12))
+                            .style(button::subtle)
+                            .padding([2, 6])
+                            .on_press_maybe(
+                                (!busy).then(|| Message::FilesDownload(e.name.clone())),
+                            ),
+                    );
+                }
+                r = r
+                    .push(
+                        button(text("Rename").size(12))
+                            .style(button::subtle)
+                            .padding([2, 6])
+                            .on_press(Message::FilesRenameStart(e.name.clone())),
+                    )
+                    .push(
+                        button(text("Delete").size(12))
+                            .style(button::subtle)
+                            .padding([2, 6])
+                            .on_press(Message::FilesAskDelete(e.name.clone(), e.is_dir)),
+                    );
+            }
+            r.into()
+        });
+        col.push(scrollable(column(rows).spacing(2)).height(Length::Fill))
+            .push(
+                text(format!(
+                    "{} {}",
+                    listing.entries.len(),
+                    if drives { "drives" } else { "items" }
+                ))
+                .size(12)
+                .style(text::secondary),
+            )
+            .into()
     }
 
     fn cmd_view(&self) -> Element<'_, Message> {

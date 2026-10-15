@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.9";
+pub const PROTOCOL_VERSION: &str = "1.10";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -470,6 +470,74 @@ pub struct ExecStatus {
     pub started_at: Millis,
     pub finished_at: Option<Millis>,
     pub error: Option<String>,
+}
+
+/// Max bytes per file chunk in either direction.
+pub const FILE_CHUNK_MAX: u32 = 8 * 1024 * 1024;
+/// Response header carrying the file's total size on `GET /v1/files/read`.
+pub const FILE_SIZE_HEADER: &str = "x-tervano-file-size";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified: Option<Millis>,
+    pub readonly: bool,
+    pub hidden: bool,
+}
+
+/// `GET /v1/files/list?path=`. An empty `path` lists drives (entry names like `C:\`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DirListing {
+    pub path: String,
+    pub entries: Vec<FileEntry>,
+}
+
+/// Query of `GET /v1/files/list` and `/hash`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilePathQuery {
+    #[serde(default)]
+    pub path: String,
+}
+
+/// Query of `GET /v1/files/read` (body: raw bytes) and `POST /v1/files/upload` (body: raw bytes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChunkQuery {
+    pub path: String,
+    pub offset: u64,
+    /// Read length, at most FILE_CHUNK_MAX (default). Ignored for uploads.
+    pub len: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileHash {
+    pub size: u64,
+    pub sha256: String,
+}
+
+/// Response of `POST /v1/files/upload`: bytes received so far (resume from here).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UploadProgress {
+    pub part_size: u64,
+}
+
+/// Body of `POST /v1/files/upload/finish`: the upload only replaces `path` if the hash matches.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadFinish {
+    pub path: String,
+    pub sha256: String,
+    pub overwrite: bool,
+}
+
+/// Body of `POST /v1/files/op`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum FileOp {
+    Rename { from: String, to: String },
+    Copy { from: String, to: String },
+    Delete { path: String, recursive: bool },
+    Mkdir { path: String },
 }
 
 /// SSE event names on `GET /api/v1/stream`.

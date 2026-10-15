@@ -190,13 +190,16 @@ async fn send(
         .map_err(|e| {
             match v.seen.lock().expect("not poisoned").as_deref() {
                 Some(seen) if seen != t.pin => format!(
-                    "Certificate changed! {address} now presents {} but {} is pinned. This can mean                      interception, or that the agent was reinstalled. Verify with                      `TervanoAgent direct-fingerprint` on the endpoint before re-adding it.",
+                    "Certificate changed! {address} now presents {} but {} is pinned. This can mean \
+                     interception, or that the agent was reinstalled. Verify with \
+                     `TervanoAgent direct-fingerprint` on the endpoint before re-adding it.",
                     display_fingerprint(seen),
                     display_fingerprint(&t.pin)
                 ),
                 // Handshake passed our check, so a failure now is the agent refusing us or the network.
                 Some(_) => format!(
-                    "The agent at {address} refused the connection. Is your technician certificate                      issued by the CA it trusts? ({e})"
+                    "The agent at {address} refused the connection. Is your technician certificate \
+                     issued by the CA it trusts? ({e})"
                 ),
                 None => format!("Cannot reach agent at {address}: {e}"),
             }
@@ -355,4 +358,219 @@ pub async fn exec_cancel(t: Target, id: uuid::Uuid) -> Result<(), String> {
     send(&t, |c, base| c.post(format!("{base}/v1/exec/{id}/cancel")))
         .await
         .map(|_| ())
+}
+
+pub async fn files_list(t: Target, path: String) -> Result<DirListing, String> {
+    json(
+        send(&t, |c, base| {
+            c.get(format!("{base}/v1/files/list"))
+                .query(&FilePathQuery { path })
+        })
+        .await?,
+    )
+    .await
+}
+
+pub async fn files_op(t: Target, op: FileOp) -> Result<(), String> {
+    send(&t, |c, base| {
+        c.post(format!("{base}/v1/files/op")).json(&op)
+    })
+    .await
+    .map(|_| ())
+}
+
+/// Per-chunk timeout: 8 MiB over a slow link takes far longer than ordinary API calls.
+const CHUNK_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Retries a chunk transfer a few times so a dropped connection resumes instead of failing.
+async fn retry<T, F: std::future::Future<Output = Result<T, String>>>(
+    mut f: impl FnMut() -> F,
+) -> Result<T, String> {
+    let mut last = String::new();
+    for attempt in 0..3 {
+        match f().await {
+            Ok(v) => return Ok(v),
+            // Authorization and validation errors won't fix themselves.
+            Err(e) if e.starts_with("Not authorized") || e.starts_with("Certificate changed") => {
+                return Err(e);
+            }
+            Err(e) => last = e,
+        }
+        tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+    }
+    Err(last)
+}
+
+/// Downloads `remote` into `local_dir` in resumable chunks and verifies size and SHA-256 against
+/// the agent's hash before the file appears under its final name. Never overwrites a local file.
+pub async fn download(
+    t: Target,
+    remote: String,
+    local_dir: std::path::PathBuf,
+) -> Result<String, String> {
+    let name = remote
+        .rsplit(['\\', '/'])
+        .next()
+        .filter(|n| !n.is_empty())
+        .ok_or("not a file path")?
+        .to_owned();
+    let mut local = local_dir.join(&name);
+    for n in 1.. {
+        if !local.exists() {
+            break;
+        }
+        local = local_dir.join(format!("{name} ({n})"));
+    }
+    let part = local.with_extension(format!(
+        "{}tervano-part",
+        local
+            .extension()
+            .map(|e| format!("{}.", e.to_string_lossy()))
+            .unwrap_or_default()
+    ));
+    // Any failure removes the partial file so nothing half-written is left behind.
+    let result: Result<u64, String> = async {
+        let mut out = std::fs::File::create(&part)
+            .map_err(|e| format!("cannot create {}: {e}", part.display()))?;
+        let mut hasher = Sha256::new();
+        let mut offset = 0u64;
+        loop {
+            let (bytes, size) = retry(|| {
+                let (t, path) = (t.clone(), remote.clone());
+                async move {
+                    let res = send(&t, |c, base| {
+                        c.get(format!("{base}/v1/files/read"))
+                            .query(&FileChunkQuery {
+                                path,
+                                offset,
+                                len: None,
+                            })
+                            .timeout(CHUNK_TIMEOUT)
+                    })
+                    .await?;
+                    let size: u64 = res
+                        .headers()
+                        .get(FILE_SIZE_HEADER)
+                        .and_then(|v| v.to_str().ok()?.parse().ok())
+                        .ok_or("agent did not report the file size")?;
+                    let bytes = res.bytes().await.map_err(|e| e.to_string())?;
+                    Ok((bytes, size))
+                }
+            })
+            .await?;
+            std::io::Write::write_all(&mut out, &bytes)
+                .map_err(|e| format!("cannot write {}: {e}", part.display()))?;
+            hasher.update(&bytes);
+            offset += bytes.len() as u64;
+            if bytes.is_empty() || offset >= size {
+                break;
+            }
+        }
+        drop(out);
+        let remote_hash: FileHash = json(
+            send(&t, |c, base| {
+                c.get(format!("{base}/v1/files/hash"))
+                    .query(&FilePathQuery {
+                        path: remote.clone(),
+                    })
+                    .timeout(CHUNK_TIMEOUT)
+            })
+            .await?,
+        )
+        .await?;
+        let local_hash = hex::encode(hasher.finalize());
+        if remote_hash.size != offset || remote_hash.sha256 != local_hash {
+            return Err(format!(
+                "download did not verify (got {offset} bytes, SHA-256 {local_hash}; agent has {} bytes, {}). The file may have changed during the transfer; try again.",
+                remote_hash.size, remote_hash.sha256
+            ));
+        }
+        Ok(offset)
+    }
+    .await;
+    let offset = match result {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = std::fs::remove_file(&part);
+            return Err(e);
+        }
+    };
+    std::fs::rename(&part, &local)
+        .map_err(|e| format!("cannot finish {}: {e}", local.display()))?;
+    Ok(format!(
+        "Downloaded {} ({} bytes, SHA-256 verified) to {}",
+        name,
+        offset,
+        local.display()
+    ))
+}
+
+/// Uploads `local` as `remote` in resumable chunks; the agent only moves it into place if the
+/// SHA-256 matches.
+pub async fn upload(
+    t: Target,
+    local: std::path::PathBuf,
+    remote: String,
+    overwrite: bool,
+) -> Result<String, String> {
+    use std::io::Read;
+    let mut f =
+        std::fs::File::open(&local).map_err(|e| format!("cannot open {}: {e}", local.display()))?;
+    let mut hasher = Sha256::new();
+    let mut offset = 0u64;
+    let mut buf = vec![0u8; FILE_CHUNK_MAX as usize];
+    loop {
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| format!("cannot read {}: {e}", local.display()))?;
+        // Always send at least one chunk so empty files are created too.
+        if n == 0 && offset > 0 {
+            break;
+        }
+        let chunk = buf[..n].to_vec();
+        hasher.update(&chunk);
+        let p: UploadProgress = retry(|| {
+            let (t, path, chunk) = (t.clone(), remote.clone(), chunk.clone());
+            async move {
+                json(
+                    send(&t, |c, base| {
+                        c.post(format!("{base}/v1/files/upload"))
+                            .query(&FileChunkQuery {
+                                path,
+                                offset,
+                                len: None,
+                            })
+                            .body(chunk)
+                            .timeout(CHUNK_TIMEOUT)
+                    })
+                    .await?,
+                )
+                .await
+            }
+        })
+        .await?;
+        offset = p.part_size;
+        if n == 0 {
+            break;
+        }
+    }
+    let sha256 = hex::encode(hasher.finalize());
+    let done: FileHash = json(
+        send(&t, |c, base| {
+            c.post(format!("{base}/v1/files/upload/finish"))
+                .json(&UploadFinish {
+                    path: remote.clone(),
+                    sha256: sha256.clone(),
+                    overwrite,
+                })
+                .timeout(CHUNK_TIMEOUT)
+        })
+        .await?,
+    )
+    .await?;
+    Ok(format!(
+        "Uploaded {} ({} bytes, SHA-256 verified) to {remote}",
+        local.display(),
+        done.size
+    ))
 }

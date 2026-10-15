@@ -6,8 +6,8 @@
 //! Authorization is checked here, per operation, never just in the Console (PLAN §12.9).
 
 use crate::{
-    collect, eventlog, exec::Jobs, inventory, processes::Processes, registry, secure, services,
-    software,
+    collect, eventlog, exec::Jobs, files, inventory, processes::Processes, registry, secure,
+    services, software,
 };
 use anyhow::Context;
 use axum::{
@@ -72,6 +72,9 @@ enum Op {
     WriteRegistry,
     RunCommand,
     CommandStatus,
+    ListFiles,
+    ReadFile,
+    WriteFile,
 }
 
 impl Op {
@@ -89,11 +92,15 @@ impl Op {
             Op::WriteRegistry => "registry.write",
             Op::RunCommand => "exec.run",
             Op::CommandStatus => "exec.status",
+            Op::ListFiles => "files.list",
+            Op::ReadFile => "files.read",
+            Op::WriteFile => "files.write",
         }
     }
 
-    /// Operations that change the machine need an explicit `operators` entry.
-    fn changes_machine(self) -> bool {
+    /// Operations that change the machine, or read what only an administrator should (file
+    /// contents, command output), need an explicit `operators` entry.
+    fn needs_operator(self) -> bool {
         matches!(
             self,
             Op::KillProcess
@@ -103,6 +110,9 @@ impl Op {
                 | Op::RunCommand
                 // Command output can be as sensitive as running it.
                 | Op::CommandStatus
+                // The agent can read any file (credential stores included) when it runs as SYSTEM.
+                | Op::ReadFile
+                | Op::WriteFile
         )
     }
 }
@@ -137,7 +147,7 @@ fn check_protocol(headers: &HeaderMap) -> ApiResult<()> {
 // shortcut: two fixed roles; configurable per-op roles arrive with RBAC (T-806).
 fn authorize(cfg: &DirectConfig, tech: &Technician, op: Op) -> ApiResult<()> {
     let listed = |list: &[String]| list.iter().any(|t| **t == *tech.0);
-    let ok = if op.changes_machine() {
+    let ok = if op.needs_operator() {
         listed(&cfg.operators)
     } else {
         cfg.allowed_technicians.is_empty() || listed(&cfg.allowed_technicians)
@@ -556,6 +566,102 @@ async fn exec_cancel(
         .map_err(|e| api_err(StatusCode::CONFLICT, e))
 }
 
+async fn files_list(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+    Query(q): Query<FilePathQuery>,
+) -> ApiResult<Json<DirListing>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::ListFiles)?;
+    blocking(move || files::list(&q.path))
+        .await?
+        .map(Json)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))
+}
+
+async fn files_read(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+    Query(q): Query<FileChunkQuery>,
+) -> ApiResult<([(String, String); 1], Vec<u8>)> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::ReadFile)?;
+    if q.offset == 0 {
+        // One line per transfer, not per chunk.
+        tracing::info!(technician = %tech.0, path = %q.path, "file download");
+    }
+    let (bytes, size) = blocking(move || files::read_chunk(&q.path, q.offset, q.len))
+        .await?
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))?;
+    Ok(([(FILE_SIZE_HEADER.to_string(), size.to_string())], bytes))
+}
+
+async fn files_hash(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+    Query(q): Query<FilePathQuery>,
+) -> ApiResult<Json<FileHash>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::ReadFile)?;
+    blocking(move || files::hash(&q.path))
+        .await?
+        .map(Json)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))
+}
+
+async fn files_upload(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+    Query(q): Query<FileChunkQuery>,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<UploadProgress>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::WriteFile)?;
+    if q.offset == 0 {
+        tracing::info!(technician = %tech.0, path = %q.path, "file upload");
+    }
+    blocking(move || files::upload_chunk(&q.path, q.offset, &body))
+        .await?
+        .map(|part_size| Json(UploadProgress { part_size }))
+        .map_err(|(e, _)| api_err(StatusCode::CONFLICT, e))
+}
+
+async fn files_upload_finish(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+    Json(req): Json<UploadFinish>,
+) -> ApiResult<Json<FileHash>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::WriteFile)?;
+    let path = req.path.clone();
+    let result = blocking(move || files::upload_finish(&req)).await?;
+    tracing::info!(technician = %tech.0, path, ok = result.is_ok(), detail = ?result.as_ref().err(), "file upload finished");
+    result
+        .map(Json)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))
+}
+
+async fn files_op(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+    Json(op): Json<FileOp>,
+) -> ApiResult<StatusCode> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::WriteFile)?;
+    let what = format!("{op:?}");
+    let result = blocking(move || files::op(&op)).await?;
+    tracing::info!(technician = %tech.0, what, ok = result.is_ok(), detail = ?result.as_ref().err(), "file operation");
+    result
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))
+}
+
 /// Serves direct management until `stop` fires.
 pub async fn serve(
     cfg: DirectConfig,
@@ -582,6 +688,18 @@ pub async fn serve(
         .route("/v1/exec", post(exec_start))
         .route("/v1/exec/{id}", get(exec_status))
         .route("/v1/exec/{id}/cancel", post(exec_cancel))
+        .route("/v1/files/list", get(files_list))
+        .route("/v1/files/read", get(files_read))
+        .route("/v1/files/hash", get(files_hash))
+        .route(
+            "/v1/files/upload",
+            // The only route taking a large body: one chunk plus headroom.
+            post(files_upload).layer(axum::extract::DefaultBodyLimit::max(
+                FILE_CHUNK_MAX as usize + 64 * 1024,
+            )),
+        )
+        .route("/v1/files/upload/finish", post(files_upload_finish))
+        .route("/v1/files/op", post(files_op))
         .route("/v1/services/{name}/control", post(control_service))
         .route(
             "/v1/services/{name}/start-type",
