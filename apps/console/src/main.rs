@@ -194,6 +194,7 @@ enum Message {
     SwAskInstall,
     SwConfirm,
     SwCancel,
+    PeriphLoaded(String, Result<Peripherals, String>),
 }
 
 /// A software change awaiting confirmation: (description, request).
@@ -530,6 +531,7 @@ enum DirectTab {
     Registry,
     Commands,
     Files,
+    Peripherals,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -632,6 +634,7 @@ struct Console {
     sw_msi_path: String,
     /// The software job started from the Software tab is tracked in `cmd_job`; this marks it.
     sw_job_label: Option<String>,
+    periph: Option<(String, Result<Peripherals, String>)>,
 }
 
 impl Console {
@@ -717,6 +720,7 @@ impl Console {
             sw_confirm: None,
             sw_msi_path: String::new(),
             sw_job_label: None,
+            periph: None,
         };
         let task = if configured { c.search() } else { Task::none() };
         (c, task)
@@ -811,6 +815,9 @@ impl Console {
             }),
             // Commands are run on demand; nothing to refresh on the 15 s tick.
             DirectTab::Commands => Task::none(),
+            DirectTab::Peripherals => Task::perform(direct::peripherals(t), move |r| {
+                Message::PeriphLoaded(addr.clone(), r)
+            }),
             DirectTab::Files => {
                 Task::perform(direct::files_list(t, self.files_path.clone()), move |r| {
                     Message::FilesLoaded(addr.clone(), r)
@@ -949,6 +956,7 @@ impl Console {
                     self.cmd_confirm = false;
                     self.cmd_notice = None;
                     self.files = None;
+                    self.periph = None;
                     self.files_path.clear();
                     self.files_input.clear();
                     self.files_notice = None;
@@ -1401,6 +1409,11 @@ impl Console {
                     };
                 }
             }
+            Message::PeriphLoaded(address, r) => {
+                if self.direct_selected.as_deref() == Some(address.as_str()) {
+                    self.periph = Some((address, r));
+                }
+            }
             Message::KillDone(r) => {
                 self.kill_notice = Some(r);
                 if let Some(addr) = self.direct_selected.clone() {
@@ -1792,6 +1805,7 @@ impl Console {
                             DirectTab::Registry => self.reg_view(),
                             DirectTab::Commands => self.cmd_view(),
                             DirectTab::Files => self.files_view(),
+                            DirectTab::Peripherals => self.periph_view(),
                         };
                         column![
                             row![
@@ -1803,7 +1817,8 @@ impl Console {
                                 tab("Software", DirectTab::Software),
                                 tab("Registry", DirectTab::Registry),
                                 tab("Commands", DirectTab::Commands),
-                                tab("Files", DirectTab::Files)
+                                tab("Files", DirectTab::Files),
+                                tab("Printers & drives", DirectTab::Peripherals)
                             ]
                             .spacing(6),
                             body
@@ -1830,6 +1845,91 @@ impl Console {
             }
         };
         column![top, content].spacing(12).into()
+    }
+
+    fn periph_view(&self) -> Element<'_, Message> {
+        let p = match &self.periph {
+            None => return centered("Reading printers and drives…"),
+            Some((_, Err(e))) => return error_box(e),
+            Some((_, Ok(p))) => p,
+        };
+        let section = |t: &'static str| text(t).size(13).style(text::primary);
+        let mut printers = column![section("Printers")].spacing(6);
+        if p.printers.is_empty() {
+            printers = printers.push(
+                text("No printers installed.")
+                    .size(13)
+                    .style(text::secondary),
+            );
+        }
+        for pr in &p.printers {
+            let state = if pr.status.is_empty() {
+                "ready".to_string()
+            } else {
+                pr.status.join(", ")
+            };
+            let mut tags = Vec::new();
+            if pr.network {
+                tags.push("network connection");
+            }
+            if pr.shared {
+                tags.push("shared");
+            }
+            printers = printers.push(
+                column![
+                    row![
+                        text(&pr.name).size(14),
+                        text(state).size(12).style(if pr.status.is_empty() {
+                            text::success
+                        } else {
+                            text::warning
+                        }),
+                        text(format!("{} job(s)", pr.jobs))
+                            .size(12)
+                            .style(text::secondary),
+                    ]
+                    .spacing(10)
+                    .align_y(Alignment::Center),
+                    text(format!(
+                        "{} · port {}{}{}",
+                        pr.driver.as_deref().unwrap_or("unknown driver"),
+                        pr.port.as_deref().unwrap_or("?"),
+                        pr.location
+                            .as_deref()
+                            .map(|l| format!(" · {l}"))
+                            .unwrap_or_default(),
+                        if tags.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · {}", tags.join(", "))
+                        }
+                    ))
+                    .size(12)
+                    .style(text::secondary),
+                ]
+                .spacing(2),
+            );
+        }
+        let mut drives = column![section("Mapped network drives (signed-in users)")].spacing(4);
+        if p.mapped_drives.is_empty() {
+            drives = drives.push(text("None.").size(13).style(text::secondary));
+        }
+        for d in &p.mapped_drives {
+            drives = drives.push(
+                text(format!(
+                    "{}  {}  →  {}{}",
+                    d.user,
+                    d.letter,
+                    d.remote_path,
+                    d.connect_as
+                        .as_deref()
+                        .map(|u| format!("  (as {u})"))
+                        .unwrap_or_default()
+                ))
+                .size(13),
+            );
+        }
+        scrollable(column![printers, rule::horizontal(1), drives].spacing(10)).into()
     }
 
     fn files_navigate(&mut self, path: String) -> Task<Message> {

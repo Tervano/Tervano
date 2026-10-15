@@ -4,6 +4,7 @@ mod eventlog;
 mod exec;
 mod files;
 mod inventory;
+mod peripherals;
 mod processes;
 #[cfg(windows)]
 mod reg;

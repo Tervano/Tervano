@@ -594,3 +594,13 @@ pub async fn software_install(t: Target, req: InstallRequest) -> Result<ExecStat
     )
     .await
 }
+
+pub async fn peripherals(t: Target) -> Result<Peripherals, String> {
+    json(
+        send(&t, |c, base| {
+            c.get(format!("{base}/v1/inventory/peripherals"))
+        })
+        .await?,
+    )
+    .await
+}

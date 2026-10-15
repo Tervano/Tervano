@@ -6,8 +6,8 @@
 //! Authorization is checked here, per operation, never just in the Console (PLAN §12.9).
 
 use crate::{
-    collect, eventlog, exec::Jobs, files, inventory, processes::Processes, registry, secure,
-    services, software,
+    collect, eventlog, exec::Jobs, files, inventory, peripherals, processes::Processes, registry,
+    secure, services, software,
 };
 use anyhow::Context;
 use axum::{
@@ -724,6 +724,19 @@ async fn software_install(
     software_job(&jobs, &tech, &format!("install {path}"), script)
 }
 
+async fn peripherals_inventory(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Peripherals>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::ReadInventory)?;
+    blocking(peripherals::inventory)
+        .await?
+        .map(Json)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))
+}
+
 /// Serves direct management until `stop` fires.
 pub async fn serve(
     cfg: DirectConfig,
@@ -742,6 +755,7 @@ pub async fn serve(
         .route("/v1/eventlog/events", get(event_records))
         .route("/v1/inventory/hardware", get(hardware_inventory))
         .route("/v1/inventory/software", get(software_inventory))
+        .route("/v1/inventory/peripherals", get(peripherals_inventory))
         .route("/v1/software/uninstall", post(software_uninstall))
         .route("/v1/software/install", post(software_install))
         .route("/v1/registry/key", get(registry_key))

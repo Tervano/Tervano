@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.11";
+pub const PROTOCOL_VERSION: &str = "1.12";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -551,6 +551,41 @@ pub struct UninstallRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallRequest {
     pub msi_path: String,
+}
+
+/// Printers and mapped drives (`GET /v1/inventory/peripherals`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Peripherals {
+    pub printers: Vec<PrinterInfo>,
+    /// Network drive mappings of every signed-in user (their registry hive is loaded).
+    pub mapped_drives: Vec<DriveMapping>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrinterInfo {
+    pub name: String,
+    pub driver: Option<String>,
+    pub port: Option<String>,
+    pub share_name: Option<String>,
+    pub location: Option<String>,
+    pub shared: bool,
+    /// A connection to a printer on another computer.
+    pub network: bool,
+    pub offline: bool,
+    /// Spooler conditions such as "paper jam" or "toner low"; empty when ready.
+    pub status: Vec<String>,
+    pub jobs: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DriveMapping {
+    /// `DOMAIN\user` (or SID when it can't be resolved).
+    pub user: String,
+    /// e.g. "Z:".
+    pub letter: String,
+    pub remote_path: String,
+    /// Alternate account the mapping connects as, if any.
+    pub connect_as: Option<String>,
 }
 
 /// SSE event names on `GET /api/v1/stream`.
