@@ -28,7 +28,7 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-005 | [x] | claude | Config system: TOML files for server + agent, validated on load | `server.example.toml`, `agent.example.toml` |
 | T-006 | [x] | claude | Initial DB migrations (SQLite) | `apps/server/migrations/` |
 | T-007 | [x] | claude | AGENTS.md + CLAUDE.md shared conventions, LICENSE (Apache-2.0) | |
-| T-008 | [~] | claude | GitHub Actions CI: fmt, clippy `-D warnings`, Windows build, Linux server build (no test job while testing is deferred) | `.github/workflows/ci.yml` |
+| T-008 | [x] | claude | GitHub Actions CI: fmt, clippy `-D warnings`, Windows build, Linux server build, MSRV 1.90 check (no test job while testing is deferred) | `.github/workflows/ci.yml`. **Paused 2026-10-15: manual `workflow_dispatch` only** (re-enable push/PR triggers when the project is ready). Errors surface as annotations. Last automatic run found clippy::result_large_err on newer stable (fixed in server, 4e…); MSRV job passed. Local runs of `cargo clippy` remain required before pushing |
 | T-009 | [ ] | | `cargo deny` / `cargo audit` job + `deny.toml` license allowlist | §18 |
 | T-010 | [~] | codex | Threat model doc `docs/security-model.md` | §12 |
 | T-011 | [ ] | | ADR folder `docs/adr/` + ADR-0001 (Iced), ADR-0002 (SQLite first, Postgres later), ADR-0003 (HTTP+JSON for phase 1 transport) | §20 |
@@ -61,6 +61,8 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-118 | [ ] | | Metrics endpoint (OpenTelemetry/Prometheus) incl. event volume | §14 |
 | T-119 | [x] | codex | Record client IP in audit rows (`into_make_service_with_connect_info`) | Verified on Windows 2026-10-15: live loopback server audit API showed `127.0.0.1` for failed technician auth (401), rejected enrollment (403), successful enrollment (200); CLI event has null IP. `cargo build/test --workspace`, clippy `-D warnings`, fmt clean. Socket peer only; proxy deployments record proxy IP. |
 | T-120 | [ ] | | Configurable event-history retention and purge | T-114 stores full state snapshots for accepted changes; without retention the table grows indefinitely. Include privacy and capacity controls. |
+| T-121 | [ ] | | Audit retention, export, and protected archive policy | PLAN §12; append-only DB triggers prevent ordinary UPDATE/DELETE, but no retention/export workflow exists. Preserve integrity across archival. |
+| T-122 | [ ] | | Technician API token expiry, revocation, and rotation | Interim bearer tokens currently have no lifecycle controls; coordinate with T-806/T-807 auth. |
 
 ### Agent
 | ID | Status | Owner | Task | Notes / acceptance |
@@ -84,6 +86,7 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-216 | [ ] | | Agent log rotation / Windows Event Log sink (service mode writes one unrotated `agent.log`) | |
 | T-218 | [ ] | | Service mode: errors before log init (bad config, icacls failure) are lost — write them to the Windows Event Log | |
 | T-217 | [ ] | | Heartbeat jitter + reconnect jitter to avoid thundering herd after server restart | §5 |
+| T-219 | [ ] | | Remove or securely retire agent bootstrap enrollment token after enrollment | Multi-use tokens may remain in plaintext `agent.toml` after `identity.json` is written. Define safe recovery/re-enrollment flow first. |
 
 ### Console
 | ID | Status | Owner | Task | Notes / acceptance |

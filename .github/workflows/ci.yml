@@ -1,9 +1,12 @@
 name: CI
 
+# Paused (2026-10-15): manual runs only until the project is ready, to conserve CI minutes.
+# To resume automatic runs, restore:
+#   push:
+#     branches: [main]
+#   pull_request:
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
