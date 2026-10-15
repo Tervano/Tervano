@@ -1,6 +1,10 @@
+mod cert;
+
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, time::Duration};
-use tervano_server::{AppState, Config, app, connect, create_enrollment_token, create_technician};
+use tervano_server::{
+    AppState, Config, app, audit, connect, create_enrollment_token, create_technician,
+};
 
 #[derive(Parser)]
 #[command(name = "tervano-server", version, about = "Tervano Server")]
@@ -14,7 +18,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run the HTTP API.
+    /// Run the API.
     Serve,
     /// Manage agent enrollment tokens.
     Token {
@@ -25,6 +29,11 @@ enum Cmd {
     Tech {
         #[command(subcommand)]
         cmd: TechCmd,
+    },
+    /// TLS certificates.
+    Cert {
+        #[command(subcommand)]
+        cmd: CertCmd,
     },
 }
 
@@ -48,6 +57,18 @@ enum TechCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum CertCmd {
+    /// Create (or reuse) a private CA in --out and issue a server certificate from it.
+    Init {
+        /// DNS name or IP address clients use to reach this server. Repeatable.
+        #[arg(long = "name", required = true)]
+        names: Vec<String>,
+        #[arg(long, default_value = "tls")]
+        out: PathBuf,
+    },
+}
+
 fn load_config(path: &PathBuf) -> anyhow::Result<Config> {
     let cfg: Config = match std::fs::read_to_string(path) {
         Ok(s) => toml::from_str(&s).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?,
@@ -58,6 +79,14 @@ fn load_config(path: &PathBuf) -> anyhow::Result<Config> {
     Ok(cfg)
 }
 
+/// The OS user running a CLI command, for audit attribution.
+fn cli_actor() -> String {
+    let user = std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "unknown".into());
+    format!("cli:{user}")
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -66,43 +95,74 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let cli = Cli::parse();
+    if let Cmd::Cert {
+        cmd: CertCmd::Init { names, out },
+    } = &cli.cmd
+    {
+        return cert::init(out, names);
+    }
     let cfg = load_config(&cli.config)?;
     let db = connect(&cfg.database_url).await?;
 
     match cli.cmd {
         Cmd::Serve => {
             let addr: std::net::SocketAddr = cfg.listen.parse()?;
-            if !addr.ip().is_loopback() {
-                // shortcut: plaintext HTTP until T-109 (TLS) lands; loopback-only is the safe default.
-                tracing::warn!(
-                    "listening on non-loopback {addr} WITHOUT TLS — development use only"
-                );
-            }
             let state = AppState {
                 db,
                 offline_after_ms: cfg.offline_after_secs as i64 * 1000,
             };
-            let listener = tokio::net::TcpListener::bind(addr).await?;
-            tracing::info!("tervano-server listening on http://{addr}");
-            axum::serve(listener, app(state))
-                .with_graceful_shutdown(async {
-                    let _ = tokio::signal::ctrl_c().await;
-                })
-                .await?;
+            let router = app(state).into_make_service();
+            let handle = axum_server::Handle::new();
+            let h = handle.clone();
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                h.graceful_shutdown(Some(Duration::from_secs(10)));
+            });
+            match (&cfg.tls_cert, &cfg.tls_key) {
+                (Some(cert), Some(key)) => {
+                    rustls::crypto::ring::default_provider()
+                        .install_default()
+                        .map_err(|_| anyhow::anyhow!("rustls provider already installed"))?;
+                    let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("loading TLS cert/key: {e}"))?;
+                    tracing::info!("tervano-server listening on https://{addr}");
+                    axum_server::bind_rustls(addr, tls)
+                        .handle(handle)
+                        .serve(router)
+                        .await?;
+                }
+                // Config::validate guarantees this is loopback.
+                _ => {
+                    tracing::info!("tervano-server listening on http://{addr} (loopback only)");
+                    axum_server::bind(addr).handle(handle).serve(router).await?;
+                }
+            }
         }
         Cmd::Token {
             cmd: TokenCmd::Create { uses, hours },
         } => {
             let token =
                 create_enrollment_token(&db, uses, Duration::from_secs(hours * 3600)).await?;
+            audit(
+                &db,
+                &cli_actor(),
+                "enrollment_token.create",
+                "",
+                true,
+                &format!("uses={uses} hours={hours}"),
+            )
+            .await;
             println!("{token}");
         }
         Cmd::Tech {
             cmd: TechCmd::Create { name },
         } => {
             let token = create_technician(&db, &name).await?;
+            audit(&db, &cli_actor(), "technician.create", &name, true, "").await;
             println!("{token}");
         }
+        Cmd::Cert { .. } => unreachable!("handled above"),
     }
     Ok(())
 }

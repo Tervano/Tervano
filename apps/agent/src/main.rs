@@ -1,4 +1,5 @@
 mod collect;
+mod secure;
 #[cfg(windows)]
 mod service;
 
@@ -20,6 +21,10 @@ pub struct Config {
     pub poll_secs: u64,
     #[serde(default = "default_heartbeat")]
     pub heartbeat_secs: u64,
+    /// Extra PEM CA certificate to trust for the server (e.g. `ca.pem` from `tervano-server cert init`).
+    /// The Windows certificate store is always trusted too.
+    #[serde(default)]
+    pub ca_cert: Option<PathBuf>,
 }
 
 fn default_poll() -> u64 {
@@ -43,8 +48,8 @@ impl Config {
         let cfg: Config =
             toml::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
         anyhow::ensure!(
-            cfg.server_url.starts_with("https://") || cfg.server_url.starts_with("http://"),
-            "server_url must be an http(s) URL"
+            url_transport_ok(&cfg.server_url),
+            "server_url must be https:// (plain http:// is only allowed to a loopback address)"
         );
         anyhow::ensure!(
             cfg.poll_secs >= 1 && cfg.heartbeat_secs >= cfg.poll_secs,
@@ -54,12 +59,66 @@ impl Config {
     }
 }
 
-/// Persisted enrollment identity.
-// shortcut: secret stored as plaintext JSON in state_dir; DPAPI + ACLs are T-208.
-#[derive(Serialize, Deserialize)]
 struct Identity {
     device_id: uuid::Uuid,
     device_secret: String,
+}
+
+/// On-disk form of [`Identity`]: the secret is DPAPI-protected (hex).
+#[derive(Serialize, Deserialize)]
+struct StoredIdentity {
+    device_id: uuid::Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    protected_secret: Option<String>,
+    /// Plaintext secret written by agent 0.1.0; migrated to `protected_secret` on load.
+    #[serde(default, skip_serializing)]
+    device_secret: Option<String>,
+}
+
+impl Identity {
+    fn load(path: &std::path::Path) -> anyhow::Result<Option<Self>> {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let corrupt = || format!("{} is unreadable; delete it to re-enroll", path.display());
+        let stored: StoredIdentity = serde_json::from_slice(&bytes).with_context(corrupt)?;
+        let id = match (stored.protected_secret, stored.device_secret) {
+            (Some(p), _) => {
+                let raw = secure::unprotect(&hex::decode(p).with_context(corrupt)?)
+                    .with_context(corrupt)?;
+                Identity {
+                    device_id: stored.device_id,
+                    device_secret: String::from_utf8(raw).with_context(corrupt)?,
+                }
+            }
+            (None, Some(plain)) => {
+                let id = Identity {
+                    device_id: stored.device_id,
+                    device_secret: plain,
+                };
+                id.save(path)?;
+                tracing::info!("migrated identity secret to DPAPI protection");
+                id
+            }
+            (None, None) => anyhow::bail!(corrupt()),
+        };
+        Ok(Some(id))
+    }
+
+    fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let stored = StoredIdentity {
+            device_id: self.device_id,
+            protected_secret: Some(hex::encode(secure::protect(self.device_secret.as_bytes())?)),
+            device_secret: None,
+        };
+        // Write-then-rename so a crash never leaves a half-written identity.
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, serde_json::to_vec(&stored)?)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
 }
 
 struct Client {
@@ -68,10 +127,17 @@ struct Client {
 }
 
 impl Client {
-    fn new(base: &str) -> anyhow::Result<Self> {
+    fn new(base: &str, ca_cert: Option<&std::path::Path>) -> anyhow::Result<Self> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(PROTOCOL_HEADER, PROTOCOL_VERSION.parse()?);
-        let http = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder();
+        if let Some(path) = ca_cert {
+            let pem = std::fs::read(path)
+                .with_context(|| format!("reading ca_cert {}", path.display()))?;
+            builder = builder.add_root_certificate(reqwest::Certificate::from_pem(&pem)?);
+        }
+        let http = builder
+            .https_only(!base.starts_with("http://"))
             .default_headers(headers)
             .timeout(Duration::from_secs(20))
             .user_agent(concat!("TervanoAgent/", env!("CARGO_PKG_VERSION")))
@@ -130,16 +196,15 @@ async fn sleep_or_stop(d: Duration, stop: &mut watch::Receiver<bool>) -> bool {
 
 /// Agent main loop: enroll if needed, then report state changes and heartbeats until `stop` fires.
 pub async fn run(cfg: Config, mut stop: watch::Receiver<bool>) -> anyhow::Result<()> {
-    let client = Client::new(&cfg.server_url)?;
+    let client = Client::new(&cfg.server_url, cfg.ca_cert.as_deref())?;
     std::fs::create_dir_all(&cfg.state_dir)?;
     let id_path = cfg.state_dir.join("identity.json");
     let poll = Duration::from_secs(cfg.poll_secs);
     let max_backoff = Duration::from_secs(300);
 
-    let identity: Identity = match std::fs::read(&id_path) {
-        Ok(b) => serde_json::from_slice(&b)
-            .context("identity.json is corrupt; delete it to re-enroll")?,
-        Err(_) => {
+    let identity = match Identity::load(&id_path)? {
+        Some(id) => id,
+        None => {
             anyhow::ensure!(
                 !cfg.enrollment_token.is_empty(),
                 "not enrolled and no enrollment_token configured"
@@ -155,7 +220,7 @@ pub async fn run(cfg: Config, mut stop: watch::Receiver<bool>) -> anyhow::Result
                             device_id: r.device_id,
                             device_secret: r.device_secret,
                         };
-                        std::fs::write(&id_path, serde_json::to_vec(&id)?)?;
+                        id.save(&id_path)?;
                         tracing::info!(device = %id.device_id, "enrolled");
                         break id;
                     }

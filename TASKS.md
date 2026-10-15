@@ -49,8 +49,8 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-106 | [x] | claude | Technician API tokens: `tervano-server tech create` CLI | interim auth until SSPI/OIDC (T-150) |
 | T-107 | [x] | claude | `GET /api/v1/devices?q=` search by hostname / logged-in user / IP (prefix + substring) | integration test |
 | T-108 | [x] | claude | `GET /api/v1/devices/{id}` details | |
-| T-109 | [~] | claude | TLS (rustls) for server listener; refuse non-loopback plaintext unless `--insecure-dev` | §12.2 — **required before any non-dev use** |
-| T-110 | [~] | claude | Append-only audit table + `GET /api/v1/audit` (enroll, token create, search by tech, device detail views) | §12 audit model |
+| T-109 | [x] | claude | TLS (rustls/ring) for server listener; non-loopback listen refused without TLS; `tervano-server cert init` private CA + server cert | §12.2. Verified 2026-10-14: HTTPS serve on 127.0.0.1 with generated cert, agent + curl over TLS OK; `0.0.0.0` w/o TLS refused; plain HTTP to TLS port fails. No `--insecure-dev` escape hatch by design. Cert rotation = re-run `cert init` (CA reused) |
+| T-110 | [x] | claude | Append-only audit table + `GET /api/v1/audit?before=&limit=` | Logged: device.enroll (ok/denied), technician.auth failures, enrollment_token.create, technician.create (CLI actor `cli:<user>`). Searches/views not logged (read-only, polled). UPDATE/DELETE blocked by triggers (verified). Gaps: no client IP (T-119), best-effort writes, any tech can read (T-806) |
 | T-111 | [ ] | | PostgreSQL backend (sqlx `postgres` feature, same migrations translated) | §13 |
 | T-112 | [ ] | | Search indexes + FTS (SQLite FTS5 / Postgres trigram) | §5. Benchmark harness (10k devices, P95) deferred with testing |
 | T-113 | [ ] | | Server push to Console (SSE or WebSocket) for live device-state updates | "visible within a few seconds" |
@@ -59,6 +59,7 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-116 | [ ] | | Rate limiting / body size limits / reconnect-storm backpressure | §14 |
 | T-117 | [ ] | | Run as Windows service + systemd unit + Dockerfile | §15 |
 | T-118 | [ ] | | Metrics endpoint (OpenTelemetry/Prometheus) incl. event volume | §14 |
+| T-119 | [ ] | | Record client IP in audit rows (`into_make_service_with_connect_info`) | |
 
 ### Agent
 | ID | Status | Owner | Task | Notes / acceptance |
@@ -71,15 +72,16 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-205 | [x] | claude | Enroll with server using token; persist identity to `state.json` | |
 | T-206 | [x] | claude | Send full state on startup, full state on change (poll-diff every N s), heartbeat when idle | Seq seeded from clock, corrected by server ack. Jitter not added yet (see T-217) |
 | T-207 | [x] | claude | Retry with exponential backoff on network failure, no duplicate state | |
-| T-208 | [~] | claude | Protect device secret with DPAPI (machine scope) instead of plaintext state file; ACL state dir to SYSTEM/Administrators | §12.11 |
+| T-208 | [x] | claude | Device secret protected with DPAPI (current account; LocalSystem in service mode); service mode ACLs state dir to SYSTEM + Administrators via icacls | Verified 2026-10-14: plaintext 0.1.0 identity.json auto-migrated to `protected_secret`, agent then reported OK. ACL step runs only in service mode — **not yet run** (needs T-201 verification) |
 | T-209 | [ ] | | Event-driven session changes (WTSRegisterSessionNotification / service control `SessionChange`) instead of poll-diff | §5 agent events |
 | T-210 | [ ] | | Event-driven network changes (NotifyIpInterfaceChange) | §5 |
 | T-211 | [ ] | | Lock/unlock detection | §5 |
 | T-212 | [ ] | | Service recovery options (restart on failure) set at install | §14 |
 | T-213 | [ ] | | Bounded on-disk event queue for offline periods | §5 |
 | T-214 | [ ] | | Measure + document idle CPU/RAM (target ≤50 MB) | §14 |
-| T-215 | [~] | claude | Server certificate pinning / CA bundle config (after T-109) | |
+| T-215 | [x] | claude | Agent `ca_cert` option (+ Windows cert store via native roots); agent/console refuse `http://` to non-loopback | Verified agent over TLS with `ca_cert` and refusal of `http://192.168.1.142`. Console CA field added, not GUI-verified. Pinning dropped: CA trust is sufficient for now |
 | T-216 | [ ] | | Agent log rotation / Windows Event Log sink (service mode writes one unrotated `agent.log`) | |
+| T-218 | [ ] | | Service mode: errors before log init (bad config, icacls failure) are lost — write them to the Windows Event Log | |
 | T-217 | [ ] | | Heartbeat jitter + reconnect jitter to avoid thundering herd after server restart | §5 |
 
 ### Console

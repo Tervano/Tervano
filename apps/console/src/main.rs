@@ -29,6 +29,8 @@ struct Settings {
     server_url: String,
     // shortcut: plaintext in the user's %APPDATA%; Credential Manager is T-306.
     token: String,
+    /// Optional PEM CA to trust for the server (e.g. `ca.pem` from `tervano-server cert init`).
+    ca_cert: String,
     dark: bool,
 }
 
@@ -76,6 +78,7 @@ enum Message {
     DetailsDone(Result<DeviceDetails, String>),
     ServerUrlChanged(String),
     TokenChanged(String),
+    CaCertChanged(String),
     SaveSettings,
     ToggleTheme,
 }
@@ -118,15 +121,19 @@ impl Console {
         (c, task)
     }
 
-    fn client(&self) -> api::Client {
-        api::Client::new(&self.settings.server_url, &self.settings.token)
+    fn client(&self) -> Result<api::Client, String> {
+        api::Client::new(
+            &self.settings.server_url,
+            &self.settings.token,
+            &self.settings.ca_cert,
+        )
     }
 
     fn search(&mut self) -> Task<Message> {
         self.search_gen += 1;
         self.loading = true;
         let (generation, client, q) = (self.search_gen, self.client(), self.query.clone());
-        Task::perform(async move { client.search(&q).await }, move |r| {
+        Task::perform(async move { client?.search(&q).await }, move |r| {
             Message::SearchDone(generation, r)
         })
     }
@@ -134,7 +141,7 @@ impl Console {
     fn load_details(&self, id: uuid::Uuid) -> Task<Message> {
         let client = self.client();
         Task::perform(
-            async move { client.details(id).await },
+            async move { client?.details(id).await },
             Message::DetailsDone,
         )
     }
@@ -172,6 +179,7 @@ impl Console {
             }
             Message::ServerUrlChanged(s) => self.draft.server_url = s,
             Message::TokenChanged(s) => self.draft.token = s,
+            Message::CaCertChanged(s) => self.draft.ca_cert = s,
             Message::SaveSettings => {
                 self.draft.server_url = self
                     .draft
@@ -180,6 +188,7 @@ impl Console {
                     .trim_end_matches('/')
                     .to_owned();
                 self.draft.token = self.draft.token.trim().to_owned();
+                self.draft.ca_cert = self.draft.ca_cert.trim().trim_matches('"').to_owned();
                 self.settings = self.draft.clone();
                 self.settings_status = Some(self.settings.save().map(|_| "Saved.".into()));
                 self.page = Page::Devices;
@@ -448,6 +457,14 @@ impl Console {
             .on_input(Message::TokenChanged)
             .on_submit(Message::SaveSettings)
             .secure(true)
+            .padding(10),
+            text("CA certificate (optional)").size(13),
+            text_input(
+                "Path to ca.pem — only if the server uses a private CA",
+                &self.draft.ca_cert
+            )
+            .on_input(Message::CaCertChanged)
+            .on_submit(Message::SaveSettings)
             .padding(10),
             button(text("Save and connect"))
                 .padding([10, 16])

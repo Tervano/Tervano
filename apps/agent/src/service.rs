@@ -73,6 +73,7 @@ fn service_main(_args: Vec<OsString>) {
 fn service_body() -> anyhow::Result<()> {
     let cfg = crate::Config::load(CONFIG_PATH.get().expect("set before dispatch"))?;
     std::fs::create_dir_all(&cfg.state_dir)?;
+    crate::secure::restrict_dir(&cfg.state_dir)?;
     // shortcut: single unrotated log file; rotation/Event Log sink is T-216.
     let log = std::fs::OpenOptions::new()
         .create(true)

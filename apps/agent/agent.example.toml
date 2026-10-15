@@ -1,5 +1,8 @@
 # Service mode reads %ProgramData%\Tervano\Agent\agent.toml.
-server_url = "http://127.0.0.1:8470"
+# Must be https:// unless the server is on this machine (loopback).
+server_url = "https://tervano.example.org:8470"
+# PEM CA to trust in addition to the Windows certificate store (e.g. ca.pem from `tervano-server cert init`).
+# ca_cert = 'C:\ProgramData\Tervano\Agent\ca.pem'
 # One-time enrollment token from `tervano-server token create`. Only needed until enrolled.
 enrollment_token = ""
 # Where identity.json is kept. Default: %ProgramData%\Tervano\Agent

@@ -16,6 +16,25 @@ pub fn is_compatible(other: &str) -> bool {
     major(other).is_some() && major(other) == major(PROTOCOL_VERSION)
 }
 
+/// Plaintext `http://` is only acceptable to a loopback host; everything else must be `https://`.
+pub fn url_transport_ok(url: &str) -> bool {
+    if url.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => authority.rsplit_once(':').map_or(authority, |(h, _)| h),
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 /// Unix time in milliseconds.
 pub type Millis = i64;
 
@@ -132,6 +151,20 @@ pub struct DeviceDetails {
     pub enrolled_at: Millis,
     pub last_seen: Millis,
     pub state: DeviceState,
+}
+
+/// One row of the server's append-only audit log.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuditRecord {
+    pub id: i64,
+    pub at: Millis,
+    /// `tech:<name>`, `device:<id>`, `cli:<os user>` or `anonymous`.
+    pub actor: String,
+    /// Dotted verb, e.g. `device.enroll`.
+    pub action: String,
+    pub target: String,
+    pub ok: bool,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

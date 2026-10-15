@@ -4,7 +4,7 @@
 
 Tervano is a free, self-hosted platform for IT departments, organizations and school systems to find, inspect and administer their Windows endpoints. It aims to combine EV Reach-style systems administration, remote desktop control, Active Directory management, live endpoint state, background troubleshooting, automation, an optional central cache, and Veyon-inspired classroom features in one native Rust application suite.
 
-> **Status: early development (Phase 1).** What works today is the vertical slice *Agent → Server → Console*: agents enroll, report real hostname / OS / network / signed-in users, and technicians search and inspect them in a native GUI. Remote control, AD, and background administration are **not implemented yet**. Tervano does not have EV Reach parity and should not be used in production yet (no TLS — see [TASKS.md](TASKS.md) T-109).
+> **Status: early development (Phase 1).** What works today is the vertical slice *Agent → Server → Console*: agents enroll, report real hostname / OS / network / signed-in users, and technicians search and inspect them in a native GUI. Remote control, AD, and background administration are **not implemented yet**. Tervano does not have EV Reach parity and should not be used in production yet.
 
 Tervano is for administering devices your organization is authorized to manage. Not affiliated with or endorsed by EasyVista, Goverlan, or Veyon.
 
@@ -33,7 +33,9 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Category | Feature | Status | Platform | Notes |
 |---|---|---|---|---|
 | Agent | Background service | Partial | Windows | SCM install/run implemented ([service.rs](apps/agent/src/service.rs)); foreground mode verified on Win 11 25H2; service mode not yet verified end-to-end |
-| Agent | Secure enrollment | Partial | Windows | One-time/N-use expiring tokens; device secret stored plaintext on agent until DPAPI (T-208); no TLS yet (T-109) |
+| Agent | Secure enrollment | Partial | Windows | One-time/N-use expiring tokens over TLS; device secret DPAPI-protected on the agent. Mutual TLS device identity is T-808 |
+| Server | TLS | Implemented | Win/Linux | rustls; plaintext only on loopback. `tervano-server cert init` creates a private CA + server cert |
+| Server | Audit log | Partial | Win/Linux | Append-only (DB triggers); enrollments, auth failures, token/technician creation. `GET /api/v1/audit` |
 | Agent | Report hostname, OS, IPs, signed-in users | Implemented | Windows | Verified on Windows 11 Home 25H2 (build 26200), workgroup machine. Not yet tested domain-joined |
 | Agent | Change detection | Partial | Windows | Poll-and-diff every `poll_secs`; event-driven notifications are T-209/T-210 |
 | Server | Device index + search | Implemented | Win/Linux | Prefix search by hostname, username, `DOMAIN\user`, IP. Tests: [api.rs](apps/server/tests/api.rs). Not yet benchmarked (T-112) |
@@ -77,10 +79,10 @@ cargo build --workspace
 mkdir -p dev-data && cd dev-data
 ../target/debug/tervano-server token create     # prints an enrollment token
 ../target/debug/tervano-server tech create --name alice   # prints a technician token
-../target/debug/tervano-server serve            # http://127.0.0.1:8470
+../target/debug/tervano-server serve            # http://127.0.0.1:8470 (plaintext is loopback-only)
 ```
 
-Create `dev-data/agent.toml` from [agent.example.toml](apps/agent/agent.example.toml) with the enrollment token and `state_dir = 'agent-state'`, then:
+Create `dev-data/agent.toml` from [agent.example.toml](apps/agent/agent.example.toml) with `server_url = "http://127.0.0.1:8470"`, the enrollment token and `state_dir = 'agent-state'`, then:
 
 ```bash
 ../target/debug/TervanoAgent run agent.toml
@@ -90,9 +92,17 @@ Run `target/debug/TervanoConsole`, paste the technician token in Settings, and s
 
 **Agent as a Windows service** (elevated prompt): put `agent.toml` in `%ProgramData%\Tervano\Agent\`, then `TervanoAgent service install` and `sc start TervanoAgent`. Logs go to `%ProgramData%\Tervano\Agent\agent.log`. Remove with `TervanoAgent service uninstall`.
 
-**Firewall:** agents need outbound TCP to the server port (default 8470). The server binds to loopback by default; binding elsewhere logs a warning because TLS is not implemented yet.
+**Serving to other machines (TLS):** the server refuses a non-loopback `listen` without TLS, and agents/consoles refuse `http://` to anything but loopback.
 
-Installers (MSI), TLS, and Linux/container server packaging are planned (T-950–T-952, T-109, T-117).
+```bash
+tervano-server cert init --name tervano.corp.example --name 10.0.0.5   # writes tls/ca.pem, server.pem, keys
+```
+
+Set `listen`, `tls_cert = 'tls/server.pem'`, `tls_key = 'tls/server-key.pem'` in `server.toml` ([example](apps/server/server.example.toml)), copy `tls/ca.pem` to endpoints and set `ca_cert` in `agent.toml` and the Console's Settings. Keep `tls/ca-key.pem` private; re-run `cert init` to rotate the server cert under the same CA. With an enterprise PKI, use your own certificate and skip `ca_cert` (the Windows certificate store is trusted). Note: Windows `curl` (Schannel) needs `--ssl-no-revoke` with the private CA because it has no CRL.
+
+**Firewall:** agents need outbound TCP to the server port (default 8470).
+
+Installers (MSI) and Linux/container server packaging are planned (T-950–T-952, T-117).
 
 ## Development
 
@@ -103,7 +113,7 @@ See [AGENTS.md](AGENTS.md) for layout, conventions and the commands that must pa
 Phases from [PLAN.md](PLAN.md) §16, tracked in detail in [TASKS.md](TASKS.md):
 
 - [x] Phase 0 — workspace, protocol, config, migrations (CI and docs still open)
-- [ ] Phase 1 — Agent → Server → Console slice (core done; TLS, audit, DPAPI, serverless open)
+- [ ] Phase 1 — Agent → Server → Console slice (core, TLS, audit, DPAPI done; serverless, live updates open)
 - [ ] Phase 2 — Remote control
 - [ ] Phase 3 — Active Directory
 - [ ] Phase 4 — Background administration
@@ -113,7 +123,7 @@ Phases from [PLAN.md](PLAN.md) §16, tracked in detail in [TASKS.md](TASKS.md):
 
 ## Security & privacy
 
-Intended model (PLAN §12): mutual authentication, TLS everywhere, per-operation authorization enforced on the agent, append-only audit, mandatory visible notification for any interactive remote session, classroom recording off by default. **Today** only bearer-token authentication and hashed secret storage exist; transport is plaintext HTTP intended for loopback development. Report vulnerabilities privately to the maintainers (SECURITY.md is T-012).
+Intended model (PLAN §12): mutual authentication, TLS everywhere, per-operation authorization enforced on the agent, append-only audit, mandatory visible notification for any interactive remote session, classroom recording off by default. **Today** there is TLS (plaintext only on loopback), bearer-token authentication, hashed secrets on the server, a DPAPI-protected device secret on the agent, and an append-only audit log of enrollments and auth failures. Role-based access and mutual TLS are not implemented yet. Report vulnerabilities privately to the maintainers (SECURITY.md is T-012).
 
 ## License
 

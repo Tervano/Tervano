@@ -11,22 +11,36 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(base: &str, token: &str) -> Self {
+    pub fn new(base: &str, token: &str, ca_cert: &str) -> Result<Self, String> {
+        if !url_transport_ok(base) {
+            return Err(format!(
+                "Server URL {base} must start with https:// (http:// is only allowed for localhost)."
+            ));
+        }
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             PROTOCOL_HEADER,
             reqwest::header::HeaderValue::from_static(PROTOCOL_VERSION),
         );
-        let http = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder();
+        if !ca_cert.is_empty() {
+            let pem = std::fs::read(ca_cert)
+                .map_err(|e| format!("Cannot read CA certificate {ca_cert}: {e}"))?;
+            let cert = reqwest::Certificate::from_pem(&pem)
+                .map_err(|e| format!("Invalid CA certificate {ca_cert}: {e}"))?;
+            builder = builder.add_root_certificate(cert);
+        }
+        let http = builder
+            .https_only(!base.starts_with("http://"))
             .default_headers(headers)
             .timeout(Duration::from_secs(10))
             .build()
-            .expect("static client config");
-        Self {
+            .map_err(|e| e.to_string())?;
+        Ok(Self {
             http,
             base: base.trim_end_matches('/').to_owned(),
             token: token.to_owned(),
-        }
+        })
     }
 
     async fn get<T: serde::de::DeserializeOwned>(

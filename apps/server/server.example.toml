@@ -3,3 +3,7 @@ listen = "127.0.0.1:8470"
 database_url = "sqlite://tervano.db?mode=rwc"
 # A device with no event for this long is shown offline. Keep > agent heartbeat_secs * 2.
 offline_after_secs = 180
+# TLS. Required when `listen` is not a loopback address. `tervano-server cert init --name <host>`
+# creates a private CA and these files; or use a certificate from your own PKI.
+# tls_cert = 'tls/server.pem'
+# tls_key = 'tls/server-key.pem'

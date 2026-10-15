@@ -21,6 +21,9 @@ pub struct Config {
     pub listen: String,
     pub database_url: String,
     pub offline_after_secs: u64,
+    /// PEM certificate chain and private key. Required unless `listen` is loopback.
+    pub tls_cert: Option<std::path::PathBuf>,
+    pub tls_key: Option<std::path::PathBuf>,
 }
 
 impl Default for Config {
@@ -29,15 +32,26 @@ impl Default for Config {
             listen: "127.0.0.1:8470".into(),
             database_url: "sqlite://tervano.db?mode=rwc".into(),
             offline_after_secs: 180,
+            tls_cert: None,
+            tls_key: None,
         }
     }
 }
 
 impl Config {
     pub fn validate(&self) -> anyhow::Result<()> {
-        self.listen
-            .parse::<std::net::SocketAddr>()
+        let addr: std::net::SocketAddr = self
+            .listen
+            .parse()
             .map_err(|e| anyhow::anyhow!("listen: {e}"))?;
+        anyhow::ensure!(
+            self.tls_cert.is_some() == self.tls_key.is_some(),
+            "set both tls_cert and tls_key, or neither"
+        );
+        anyhow::ensure!(
+            self.tls_cert.is_some() || addr.ip().is_loopback(),
+            "listen = {addr} is not loopback: configure tls_cert/tls_key (see `tervano-server cert init`)"
+        );
         anyhow::ensure!(
             self.offline_after_secs >= 10,
             "offline_after_secs must be >= 10"
@@ -119,6 +133,7 @@ pub fn app(state: AppState) -> Router {
         .route("/events", post(ingest_events))
         .route("/devices", get(search_devices))
         .route("/devices/{id}", get(device_details))
+        .route("/audit", get(list_audit))
         .layer(middleware::from_fn(require_protocol))
         // State JSON is small; this bounds memory per request.
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024));
@@ -216,7 +231,49 @@ impl FromRequestParts<AppState> for TechAuth {
                 .bind(hash_secret(token))
                 .fetch_optional(&s.db)
                 .await?;
-        name.map(|name| TechAuth { name }).ok_or_else(unauthorized)
+        match name {
+            Some(name) => Ok(TechAuth { name }),
+            None => {
+                audit(
+                    &s.db,
+                    "anonymous",
+                    "technician.auth",
+                    "",
+                    false,
+                    "unknown token",
+                )
+                .await;
+                Err(unauthorized())
+            }
+        }
+    }
+}
+
+/// Appends to the audit log. Best-effort: a failure is logged, not surfaced to the caller.
+// shortcut: privileged ops still succeed if the audit write fails; fail-closed once ops exist (T-402).
+pub async fn audit(
+    db: &SqlitePool,
+    actor: &str,
+    action: &str,
+    target: &str,
+    ok: bool,
+    detail: &str,
+) {
+    // Detail can contain client-supplied text; cap it so it can't bloat the log.
+    let detail: String = detail.chars().take(512).collect();
+    let r = sqlx::query(
+        "INSERT INTO audit_log (at, actor, action, target, ok, detail) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(now_millis())
+    .bind(actor)
+    .bind(action)
+    .bind(target)
+    .bind(ok)
+    .bind(detail)
+    .execute(db)
+    .await;
+    if let Err(e) = r {
+        tracing::error!(action, actor, "audit write failed: {e}");
     }
 }
 
@@ -236,6 +293,17 @@ async fn enroll(
     .await?
     .rows_affected();
     if consumed != 1 {
+        drop(tx);
+        let host: String = req.state.hostname.chars().take(64).collect();
+        audit(
+            &s.db,
+            "anonymous",
+            "device.enroll",
+            &host,
+            false,
+            "invalid or expired token",
+        )
+        .await;
         return Err(AppError(err(
             StatusCode::FORBIDDEN,
             "invalid or expired enrollment token",
@@ -258,6 +326,16 @@ async fn enroll(
     write_projections(&mut tx, &id.to_string(), &req.state).await?;
     tx.commit().await?;
     tracing::info!(device = %id, hostname = %req.state.hostname, "device enrolled");
+    let actor = format!("device:{id}");
+    audit(
+        &s.db,
+        &actor,
+        "device.enroll",
+        &req.state.hostname,
+        true,
+        "",
+    )
+    .await;
     Ok(Json(EnrollResponse {
         device_id: id,
         device_secret: secret,
@@ -435,6 +513,43 @@ fn primary_ip(addrs: &[NetAddress]) -> Option<String> {
         .find(|a| !a.address.contains(':'))
         .or_else(|| addrs.iter().find(usable))
         .map(|a| a.address.clone())
+}
+
+#[derive(Deserialize)]
+struct AuditParams {
+    /// Return records with id < before (pagination, newest first).
+    before: Option<i64>,
+    #[serde(default = "default_limit")]
+    limit: u32,
+}
+
+// shortcut: any technician can read the audit log until RBAC (T-806).
+async fn list_audit(
+    State(s): State<AppState>,
+    _tech: TechAuth,
+    Query(p): Query<AuditParams>,
+) -> Result<Json<Vec<AuditRecord>>, AppError> {
+    let rows = sqlx::query(
+        "SELECT id, at, actor, action, target, ok, detail FROM audit_log
+         WHERE id < ? ORDER BY id DESC LIMIT ?",
+    )
+    .bind(p.before.unwrap_or(i64::MAX))
+    .bind(p.limit.clamp(1, 1000) as i64)
+    .fetch_all(&s.db)
+    .await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| AuditRecord {
+                id: r.get("id"),
+                at: r.get("at"),
+                actor: r.get("actor"),
+                action: r.get("action"),
+                target: r.get("target"),
+                ok: r.get("ok"),
+                detail: r.get("detail"),
+            })
+            .collect(),
+    ))
 }
 
 async fn device_details(
