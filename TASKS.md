@@ -30,7 +30,7 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-007 | [x] | claude | AGENTS.md + CLAUDE.md shared conventions, LICENSE (Apache-2.0) | |
 | T-008 | [~] | claude | GitHub Actions CI: fmt, clippy `-D warnings`, Windows build, Linux server build (no test job while testing is deferred) | `.github/workflows/ci.yml` |
 | T-009 | [ ] | | `cargo deny` / `cargo audit` job + `deny.toml` license allowlist | §18 |
-| T-010 | [ ] | | Threat model doc `docs/security-model.md` | §12 |
+| T-010 | [~] | codex | Threat model doc `docs/security-model.md` | §12 |
 | T-011 | [ ] | | ADR folder `docs/adr/` + ADR-0001 (Iced), ADR-0002 (SQLite first, Postgres later), ADR-0003 (HTTP+JSON for phase 1 transport) | §20 |
 | T-012 | [ ] | | CONTRIBUTING.md, CODE_OF_CONDUCT.md, SECURITY.md, THIRD_PARTY_LICENSES generation | §18 |
 | T-013 | [ ] | | Remaining docs skeletons with real content: architecture, network-protocol, agent-design, server-deployment, development, roadmap | §20 — only document what exists |
@@ -54,7 +54,7 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 | T-111 | [ ] | | PostgreSQL backend (sqlx `postgres` feature, same migrations translated) | §13 |
 | T-112 | [ ] | | Search indexes + FTS (SQLite FTS5 / Postgres trigram) | §5. Benchmark harness (10k devices, P95) deferred with testing |
 | T-113 | [x] | claude | Server push: SSE `GET /api/v1/stream` (`device` {id} / `resync` on lag), bounded broadcast (1024), 5 s offline sweeper announces timeouts | Verified 2026-10-15 over TLS with curl: event on agent start, event ~10 s after agent killed (sweeper), `:` keep-alives every 15 s. Shortcut: all techs see all device ids until RBAC (T-806) |
-| T-114 | [ ] | | Event history table + `GET /api/v1/devices/{id}/events` | |
+| T-114 | [~] | codex | Event history table + `GET /api/v1/devices/{id}/events` | |
 | T-115 | [ ] | | Device decommission / re-enroll (revoke secret) API + CLI | §5 device identity |
 | T-116 | [ ] | | Rate limiting / body size limits / reconnect-storm backpressure | §14 |
 | T-117 | [ ] | | Run as Windows service + systemd unit + Dockerfile | §15 |
