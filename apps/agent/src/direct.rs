@@ -7,7 +7,7 @@
 
 use crate::{
     collect, eventlog, exec::Jobs, files, inventory, peripherals, processes::Processes, registry,
-    secure, services, software,
+    secure, services, software, wmiq,
 };
 use anyhow::Context;
 use axum::{
@@ -76,6 +76,7 @@ enum Op {
     ReadFile,
     WriteFile,
     ManageSoftware,
+    QueryWmi,
 }
 
 impl Op {
@@ -97,6 +98,7 @@ impl Op {
             Op::ReadFile => "files.read",
             Op::WriteFile => "files.write",
             Op::ManageSoftware => "software.manage",
+            Op::QueryWmi => "wmi.query",
         }
     }
 
@@ -116,6 +118,8 @@ impl Op {
                 | Op::ReadFile
                 | Op::WriteFile
                 | Op::ManageSoftware
+                // WMI exposes data such as process command lines, which can carry secrets.
+                | Op::QueryWmi
         )
     }
 }
@@ -737,6 +741,48 @@ async fn peripherals_inventory(
         .map_err(|e| api_err(StatusCode::CONFLICT, e))
 }
 
+async fn wmi_query(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+    Query(q): Query<WmiQuery>,
+) -> ApiResult<Json<WmiTable>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::QueryWmi)?;
+    tracing::info!(technician = %tech.0, namespace = ?q.namespace, wql = %q.wql, "wmi query");
+    blocking(move || wmiq::query(&q))
+        .await?
+        .map(Json)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))
+}
+
+async fn wmi_classes(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+    Query(q): Query<WmiQuery>,
+) -> ApiResult<Json<Vec<String>>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::QueryWmi)?;
+    blocking(move || wmiq::classes(q.namespace.as_deref()))
+        .await?
+        .map(Json)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))
+}
+
+async fn update_status(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    headers: HeaderMap,
+) -> ApiResult<Json<UpdateStatus>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::ReadInventory)?;
+    blocking(wmiq::updates)
+        .await?
+        .map(Json)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))
+}
+
 /// Serves direct management until `stop` fires.
 pub async fn serve(
     cfg: DirectConfig,
@@ -756,6 +802,9 @@ pub async fn serve(
         .route("/v1/inventory/hardware", get(hardware_inventory))
         .route("/v1/inventory/software", get(software_inventory))
         .route("/v1/inventory/peripherals", get(peripherals_inventory))
+        .route("/v1/wmi/query", get(wmi_query))
+        .route("/v1/wmi/classes", get(wmi_classes))
+        .route("/v1/updates", get(update_status))
         .route("/v1/software/uninstall", post(software_uninstall))
         .route("/v1/software/install", post(software_install))
         .route("/v1/registry/key", get(registry_key))

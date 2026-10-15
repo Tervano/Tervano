@@ -195,6 +195,14 @@ enum Message {
     SwConfirm,
     SwCancel,
     PeriphLoaded(String, Result<Peripherals, String>),
+    WmiNamespace(String),
+    WmiWql(String),
+    WmiClassFilter(String),
+    WmiPickClass(String),
+    WmiRun,
+    WmiLoaded(Result<WmiTable, String>),
+    WmiClasses(Result<Vec<String>, String>),
+    UpdatesLoaded(String, Result<UpdateStatus, String>),
 }
 
 /// A software change awaiting confirmation: (description, request).
@@ -532,6 +540,8 @@ enum DirectTab {
     Commands,
     Files,
     Peripherals,
+    Updates,
+    Wmi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -635,6 +645,13 @@ struct Console {
     /// The software job started from the Software tab is tracked in `cmd_job`; this marks it.
     sw_job_label: Option<String>,
     periph: Option<(String, Result<Peripherals, String>)>,
+    wmi_namespace: String,
+    wmi_wql: String,
+    wmi_class_filter: String,
+    wmi_classes: Vec<String>,
+    wmi_result: Option<Result<WmiTable, String>>,
+    wmi_running: bool,
+    updates: Option<(String, Result<UpdateStatus, String>)>,
 }
 
 impl Console {
@@ -721,6 +738,13 @@ impl Console {
             sw_msi_path: String::new(),
             sw_job_label: None,
             periph: None,
+            wmi_namespace: r"ROOT\CIMV2".into(),
+            wmi_wql: "SELECT Caption, Version, LastBootUpTime FROM Win32_OperatingSystem".into(),
+            wmi_class_filter: String::new(),
+            wmi_classes: Vec::new(),
+            wmi_result: None,
+            wmi_running: false,
+            updates: None,
         };
         let task = if configured { c.search() } else { Task::none() };
         (c, task)
@@ -818,6 +842,15 @@ impl Console {
             DirectTab::Peripherals => Task::perform(direct::peripherals(t), move |r| {
                 Message::PeriphLoaded(addr.clone(), r)
             }),
+            DirectTab::Updates => Task::perform(direct::updates(t), move |r| {
+                Message::UpdatesLoaded(addr.clone(), r)
+            }),
+            // Queries run on demand; only fetch the class list once per endpoint.
+            DirectTab::Wmi if self.wmi_classes.is_empty() => Task::perform(
+                direct::wmi_classes(t, self.wmi_namespace.clone()),
+                Message::WmiClasses,
+            ),
+            DirectTab::Wmi => Task::none(),
             DirectTab::Files => {
                 Task::perform(direct::files_list(t, self.files_path.clone()), move |r| {
                     Message::FilesLoaded(addr.clone(), r)
@@ -957,6 +990,9 @@ impl Console {
                     self.cmd_notice = None;
                     self.files = None;
                     self.periph = None;
+                    self.updates = None;
+                    self.wmi_classes.clear();
+                    self.wmi_result = None;
                     self.files_path.clear();
                     self.files_input.clear();
                     self.files_notice = None;
@@ -1414,6 +1450,47 @@ impl Console {
                     self.periph = Some((address, r));
                 }
             }
+            Message::WmiNamespace(n) => {
+                self.wmi_namespace = n;
+                self.wmi_classes.clear();
+            }
+            Message::WmiWql(q) => self.wmi_wql = q,
+            Message::WmiClassFilter(f) => {
+                self.wmi_class_filter = f;
+                // Namespace may have changed since the last class fetch.
+                if self.wmi_classes.is_empty()
+                    && let Some(t) = self.direct_selected.as_deref().and_then(|a| self.target(a))
+                {
+                    return Task::perform(
+                        direct::wmi_classes(t, self.wmi_namespace.clone()),
+                        Message::WmiClasses,
+                    );
+                }
+            }
+            Message::WmiPickClass(c) => {
+                self.wmi_wql = format!("SELECT * FROM {c}");
+                self.wmi_class_filter.clear();
+            }
+            Message::WmiRun => {
+                if let Some(t) = self.direct_selected.as_deref().and_then(|a| self.target(a)) {
+                    self.wmi_running = true;
+                    let q = WmiQuery {
+                        namespace: Some(self.wmi_namespace.trim().to_owned()),
+                        wql: self.wmi_wql.trim().to_owned(),
+                    };
+                    return Task::perform(direct::wmi_query(t, q), Message::WmiLoaded);
+                }
+            }
+            Message::WmiLoaded(r) => {
+                self.wmi_running = false;
+                self.wmi_result = Some(r);
+            }
+            Message::WmiClasses(r) => self.wmi_classes = r.unwrap_or_default(),
+            Message::UpdatesLoaded(address, r) => {
+                if self.direct_selected.as_deref() == Some(address.as_str()) {
+                    self.updates = Some((address, r));
+                }
+            }
             Message::KillDone(r) => {
                 self.kill_notice = Some(r);
                 if let Some(addr) = self.direct_selected.clone() {
@@ -1806,6 +1883,8 @@ impl Console {
                             DirectTab::Commands => self.cmd_view(),
                             DirectTab::Files => self.files_view(),
                             DirectTab::Peripherals => self.periph_view(),
+                            DirectTab::Updates => self.updates_view(),
+                            DirectTab::Wmi => self.wmi_view(),
                         };
                         column![
                             row![
@@ -1818,7 +1897,9 @@ impl Console {
                                 tab("Registry", DirectTab::Registry),
                                 tab("Commands", DirectTab::Commands),
                                 tab("Files", DirectTab::Files),
-                                tab("Printers & drives", DirectTab::Peripherals)
+                                tab("Printers & drives", DirectTab::Peripherals),
+                                tab("Updates", DirectTab::Updates),
+                                tab("WMI", DirectTab::Wmi)
                             ]
                             .spacing(6),
                             body
@@ -1845,6 +1926,157 @@ impl Console {
             }
         };
         column![top, content].spacing(12).into()
+    }
+
+    fn updates_view(&self) -> Element<'_, Message> {
+        let u = match &self.updates {
+            None => return centered("Reading installed updates…"),
+            Some((_, Err(e))) => return error_box(e),
+            Some((_, Ok(u))) => u,
+        };
+        let mut col = column![].spacing(6);
+        col = col.push(if u.reboot_pending.is_empty() {
+            container(text("No restart pending.").size(13))
+                .padding(8)
+                .width(Length::Fill)
+                .style(container::rounded_box)
+        } else {
+            container(text(format!("Restart pending: {}", u.reboot_pending.join("; "))).size(13))
+                .padding(8)
+                .width(Length::Fill)
+                .style(container::warning)
+        });
+        let header = row![
+            text("Update").size(12).width(Length::FillPortion(2)),
+            text("Type").size(12).width(Length::FillPortion(2)),
+            text("Installed").size(12).width(Length::FillPortion(2)),
+            text("By").size(12).width(Length::FillPortion(3)),
+        ]
+        .spacing(4);
+        let rows = u.hotfixes.iter().map(|h| {
+            row![
+                text(&h.id).size(13).width(Length::FillPortion(2)),
+                text(h.description.as_deref().unwrap_or("—"))
+                    .size(13)
+                    .width(Length::FillPortion(2)),
+                text(h.installed_on.as_deref().unwrap_or("—"))
+                    .size(13)
+                    .width(Length::FillPortion(2)),
+                text(h.installed_by.as_deref().unwrap_or("—"))
+                    .size(12)
+                    .width(Length::FillPortion(3)),
+            ]
+            .spacing(4)
+            .into()
+        });
+        col.push(container(header).style(container::rounded_box))
+            .push(scrollable(column(rows).spacing(3)).height(Length::Fill))
+            .push(
+                text(format!(
+                    "{} installed updates (Windows' hotfix list; feature updates and Store apps are not included)",
+                    u.hotfixes.len()
+                ))
+                .size(12)
+                .style(text::secondary),
+            )
+            .into()
+    }
+
+    fn wmi_view(&self) -> Element<'_, Message> {
+        let controls = column![
+            row![
+                text_input(r"ROOT\CIMV2", &self.wmi_namespace)
+                    .on_input(Message::WmiNamespace)
+                    .padding(6)
+                    .width(200),
+                text_input("SELECT … FROM …", &self.wmi_wql)
+                    .on_input(Message::WmiWql)
+                    .on_submit(Message::WmiRun)
+                    .padding(6)
+                    .font(iced::Font::MONOSPACE),
+                button(text(if self.wmi_running {
+                    "Running…"
+                } else {
+                    "Run"
+                }))
+                .style(button::primary)
+                .on_press_maybe((!self.wmi_running).then_some(Message::WmiRun)),
+            ]
+            .spacing(6),
+            text_input(
+                "Find a class, e.g. bios, disk, network…",
+                &self.wmi_class_filter
+            )
+            .on_input(Message::WmiClassFilter)
+            .padding(6),
+        ]
+        .spacing(6);
+        let mut col = column![
+            text("Read-only WQL (SELECT, ASSOCIATORS OF, REFERENCES OF). Requires operator rights; queries are logged on the agent.")
+                .size(12)
+                .style(text::secondary),
+            controls
+        ]
+        .spacing(8);
+        let f = self.wmi_class_filter.trim().to_lowercase();
+        if f.len() >= 2 {
+            let matches: Vec<&String> = self
+                .wmi_classes
+                .iter()
+                .filter(|c| c.to_lowercase().contains(&f))
+                .take(12)
+                .collect();
+            col = col.push(matches.into_iter().fold(row![].spacing(4), |r, c| {
+                r.push(
+                    button(text(c).size(12))
+                        .style(button::subtle)
+                        .padding([2, 6])
+                        .on_press(Message::WmiPickClass(c.clone())),
+                )
+            }));
+        }
+        let table = match &self.wmi_result {
+            None => return col.into(),
+            Some(Err(e)) => return col.push(error_box(e)).into(),
+            Some(Ok(t)) => t,
+        };
+        // One card per instance with its non-empty properties: SELECT * is far too wide for a grid.
+        let cards = table.rows.iter().map(|r| {
+            let props = table
+                .columns
+                .iter()
+                .zip(r)
+                .filter(|(c, v)| !v.is_empty() && !c.starts_with("__"))
+                .fold(column![].spacing(1), |col, (c, v)| {
+                    col.push(
+                        row![
+                            text(c).size(12).style(text::secondary).width(220),
+                            text(v).size(12).font(iced::Font::MONOSPACE),
+                        ]
+                        .spacing(8),
+                    )
+                });
+            container(props)
+                .padding(6)
+                .width(Length::Fill)
+                .style(container::bordered_box)
+                .into()
+        });
+        col.push(scrollable(column(cards).spacing(6)).height(Length::Fill))
+            .push(
+                text(format!(
+                    "{} instance(s){}",
+                    table.rows.len(),
+                    if table.truncated {
+                        " · truncated at 2000"
+                    } else {
+                        ""
+                    }
+                ))
+                .size(12)
+                .style(text::secondary),
+            )
+            .into()
     }
 
     fn periph_view(&self) -> Element<'_, Message> {

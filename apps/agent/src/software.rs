@@ -59,6 +59,16 @@ pub fn inventory() -> SoftwareInventory {
     // The same product can appear in more than one view; keep one row per name/version/scope.
     apps.dedup_by(|a, b| a.name == b.name && a.version == b.version && a.scope == b.scope);
 
+    SoftwareInventory {
+        apps,
+        reboot_pending: reboot_pending(),
+    }
+}
+
+/// Why Windows wants a restart; empty when it doesn't.
+#[cfg(windows)]
+pub fn reboot_pending() -> Vec<String> {
+    use crate::reg::{HKEY_LOCAL_MACHINE, Key, View};
     let mut reboot_pending = Vec::new();
     let key_exists = |path: &str| Key::open(HKEY_LOCAL_MACHINE, path, View::Wow64_64).is_some();
     if key_exists(
@@ -91,10 +101,7 @@ pub fn inventory() -> SoftwareInventory {
         reboot_pending.push("computer rename".into());
     }
 
-    SoftwareInventory {
-        apps,
-        reboot_pending,
-    }
+    reboot_pending
 }
 
 #[cfg(not(windows))]

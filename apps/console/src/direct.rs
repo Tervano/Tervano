@@ -604,3 +604,31 @@ pub async fn peripherals(t: Target) -> Result<Peripherals, String> {
     )
     .await
 }
+
+pub async fn wmi_query(t: Target, q: WmiQuery) -> Result<WmiTable, String> {
+    json(
+        send(&t, |c, base| {
+            c.get(format!("{base}/v1/wmi/query")).query(&q)
+        })
+        .await?,
+    )
+    .await
+}
+
+pub async fn wmi_classes(t: Target, namespace: String) -> Result<Vec<String>, String> {
+    let q = WmiQuery {
+        namespace: Some(namespace),
+        wql: String::new(),
+    };
+    json(
+        send(&t, |c, base| {
+            c.get(format!("{base}/v1/wmi/classes")).query(&q)
+        })
+        .await?,
+    )
+    .await
+}
+
+pub async fn updates(t: Target) -> Result<UpdateStatus, String> {
+    json(send(&t, |c, base| c.get(format!("{base}/v1/updates"))).await?).await
+}

@@ -14,6 +14,7 @@ mod secure;
 mod service;
 mod services;
 mod software;
+mod wmiq;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.12";
+pub const PROTOCOL_VERSION: &str = "1.13";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -586,6 +586,41 @@ pub struct DriveMapping {
     pub remote_path: String,
     /// Alternate account the mapping connects as, if any.
     pub connect_as: Option<String>,
+}
+
+/// Query string of `GET /v1/wmi/query` (read-only WQL) and `/v1/wmi/classes`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WmiQuery {
+    /// Default `ROOT\CIMV2`.
+    pub namespace: Option<String>,
+    #[serde(default)]
+    pub wql: String,
+}
+
+/// WQL results as text, column order as first seen.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WmiTable {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    /// More rows existed than the agent returns (2000).
+    pub truncated: bool,
+}
+
+/// Installed updates and restart state (`GET /v1/updates`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateStatus {
+    pub hotfixes: Vec<Hotfix>,
+    pub reboot_pending: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Hotfix {
+    /// e.g. "KB5031455".
+    pub id: String,
+    pub description: Option<String>,
+    /// As Windows reports it, usually `M/D/YYYY`.
+    pub installed_on: Option<String>,
+    pub installed_by: Option<String>,
 }
 
 /// SSE event names on `GET /api/v1/stream`.
