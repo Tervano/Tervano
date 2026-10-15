@@ -223,18 +223,25 @@ fn err(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(ApiError { error: msg.into() })).into_response()
 }
 
-pub struct AppError(Response);
+/// Boxed so `Result<_, AppError>` stays small (clippy::result_large_err).
+pub struct AppError(Box<Response>);
+
+impl AppError {
+    fn new(r: Response) -> Self {
+        Self(Box::new(r))
+    }
+}
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        self.0
+        *self.0
     }
 }
 
 impl From<sqlx::Error> for AppError {
     fn from(e: sqlx::Error) -> Self {
         tracing::error!("database error: {e}");
-        AppError(err(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))
+        AppError::new(err(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))
     }
 }
 
@@ -255,7 +262,8 @@ pub struct DeviceAuth {
 impl FromRequestParts<AppState> for DeviceAuth {
     type Rejection = AppError;
     async fn from_request_parts(parts: &mut Parts, s: &AppState) -> Result<Self, Self::Rejection> {
-        let unauthorized = || AppError(err(StatusCode::UNAUTHORIZED, "invalid device credentials"));
+        let unauthorized =
+            || AppError::new(err(StatusCode::UNAUTHORIZED, "invalid device credentials"));
         let secret = bearer(parts).ok_or_else(unauthorized)?;
         let id: Option<String> =
             sqlx::query_scalar("SELECT id FROM devices WHERE secret_hash = ? AND revoked = 0")
@@ -274,7 +282,8 @@ pub struct TechAuth {
 impl FromRequestParts<AppState> for TechAuth {
     type Rejection = AppError;
     async fn from_request_parts(parts: &mut Parts, s: &AppState) -> Result<Self, Self::Rejection> {
-        let unauthorized = || AppError(err(StatusCode::UNAUTHORIZED, "invalid technician token"));
+        let unauthorized =
+            || AppError::new(err(StatusCode::UNAUTHORIZED, "invalid technician token"));
         let token = bearer(parts).ok_or_else(unauthorized)?;
         let name: Option<String> =
             sqlx::query_scalar("SELECT name FROM technicians WHERE token_hash = ?")
@@ -364,7 +373,7 @@ async fn enroll(
             client_ip,
         )
         .await;
-        return Err(AppError(err(
+        return Err(AppError::new(err(
             StatusCode::FORBIDDEN,
             "invalid or expired enrollment token",
         )));
@@ -447,7 +456,7 @@ async fn ingest_events(
     Json(events): Json<Vec<AgentEvent>>,
 ) -> Result<Json<EventAck>, AppError> {
     if events.len() > 500 {
-        return Err(AppError(err(
+        return Err(AppError::new(err(
             StatusCode::PAYLOAD_TOO_LARGE,
             "max 500 events per batch",
         )));
@@ -465,8 +474,9 @@ async fn ingest_events(
     let was_offline = prev_seen <= now - s.offline_after_ms;
     let mut changed = false;
     for ev in events {
-        let seq = i64::try_from(ev.seq)
-            .map_err(|_| AppError(err(StatusCode::BAD_REQUEST, "event seq exceeds maximum")))?;
+        let seq = i64::try_from(ev.seq).map_err(|_| {
+            AppError::new(err(StatusCode::BAD_REQUEST, "event seq exceeds maximum"))
+        })?;
         if seq <= last_seq {
             continue;
         }
@@ -667,10 +677,10 @@ async fn device_details(
     .bind(id.to_string())
     .fetch_optional(&s.db)
     .await?
-    .ok_or_else(|| AppError(err(StatusCode::NOT_FOUND, "device not found")))?;
+    .ok_or_else(|| AppError::new(err(StatusCode::NOT_FOUND, "device not found")))?;
     let last_seen: i64 = row.get("last_seen");
     let state = serde_json::from_str(row.get::<&str, _>("state_json")).map_err(|_| {
-        AppError(err(
+        AppError::new(err(
             StatusCode::INTERNAL_SERVER_ERROR,
             "corrupt device state",
         ))
@@ -705,7 +715,10 @@ async fn device_events(
             .fetch_one(&s.db)
             .await?;
     if !exists {
-        return Err(AppError(err(StatusCode::NOT_FOUND, "device not found")));
+        return Err(AppError::new(err(
+            StatusCode::NOT_FOUND,
+            "device not found",
+        )));
     }
     let before = p.before.map_or(i64::MAX, |seq| seq.saturating_sub(1));
     let rows = sqlx::query(
@@ -721,7 +734,7 @@ async fn device_events(
     for row in rows {
         let event = serde_json::from_str(row.get("event_json")).map_err(|e| {
             tracing::error!(device = %id, "corrupt device event: {e}");
-            AppError(err(
+            AppError::new(err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "corrupt device event",
             ))
