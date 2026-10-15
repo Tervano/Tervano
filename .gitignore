@@ -1,0 +1,7 @@
+/target
+*.db
+*.db-shm
+*.db-wal
+/dev-data/
+server.toml
+agent.toml

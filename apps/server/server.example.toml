@@ -1,0 +1,5 @@
+# Copy to server.toml. All fields optional; defaults shown.
+listen = "127.0.0.1:8470"
+database_url = "sqlite://tervano.db?mode=rwc"
+# A device with no event for this long is shown offline. Keep > agent heartbeat_secs * 2.
+offline_after_secs = 180
