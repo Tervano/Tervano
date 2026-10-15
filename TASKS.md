@@ -113,8 +113,8 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked (say why)
 
 | ID | Status | Owner | Task | Notes / acceptance |
 |---|---|---|---|---|
-| T-400 | [ ] | | Agent direct listener (TLS, mutual auth) exposing device info | §2A serverless, §6 transport |
-| T-401 | [ ] | | Authorization model for direct connections (tech cert / Kerberos; IP knowledge ≠ permission) | §12 |
+| T-400 | [~] | claude | Agent direct listener (TLS, mutual auth) exposing device info | §2A serverless, §6 transport |
+| T-401 | [~] | claude | Authorization model for direct connections (tech cert / Kerberos; IP knowledge ≠ permission) | §12 |
 | T-402 | [ ] | | Agent-side per-operation authorization checks | §12.9 |
 | T-403 | [ ] | | Server connection-authorization tickets (short-lived, signed) agents can verify offline | §2C non-negotiable outage behaviour |
 | T-404 | [ ] | | QUIC transport (quinn) with TCP/TLS fallback | §6 |
