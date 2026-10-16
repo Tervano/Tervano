@@ -3,6 +3,7 @@
 pub mod audit_archive;
 mod groups;
 mod rbac;
+mod reports;
 
 pub use rbac::set_technician_access;
 mod jobs;
@@ -519,6 +520,10 @@ pub fn app(state: AppState) -> Router {
         .route("/devices/{id}/events", get(device_events))
         .route("/audit", get(list_audit))
         .route("/me", get(rbac::me))
+        .route("/reports/software", get(reports::software))
+        .route("/reports/software/devices", get(reports::software_devices))
+        .route("/reports/os", get(reports::os))
+        .route("/reports/hardware", get(reports::hardware))
         .route(
             "/groups",
             get(groups::list_groups).post(groups::create_group),

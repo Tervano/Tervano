@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.19";
+pub const PROTOCOL_VERSION: &str = "1.20";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -662,6 +662,55 @@ pub struct TerminalOutput {
 pub struct TerminalSince {
     #[serde(default)]
     pub since: u64,
+}
+
+/// `GET /api/v1/reports/software?q=`: one installed software entry and how many devices have it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SoftwareReportRow {
+    pub name: String,
+    pub version: Option<String>,
+    pub publisher: Option<String>,
+    pub devices: u32,
+}
+
+/// A device in a report drill-down (`GET /api/v1/reports/software/devices?name=&version=`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReportDevice {
+    pub id: Uuid,
+    pub hostname: String,
+    pub online: bool,
+    pub last_seen: Millis,
+}
+
+/// `GET /api/v1/reports/os`: devices per operating system build.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OsReportRow {
+    pub name: String,
+    pub version: String,
+    pub build: String,
+    pub devices: u32,
+    pub online: u32,
+}
+
+/// `GET /api/v1/reports/hardware`: one row per device with an inventory snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HardwareReportRow {
+    pub device_id: Uuid,
+    pub hostname: String,
+    /// When the agent collected the inventory this row comes from.
+    pub collected_at: Millis,
+    pub manufacturer: Option<String>,
+    pub model: Option<String>,
+    pub serial_number: Option<String>,
+    pub cpu_model: String,
+    pub cpu_logical_cores: u32,
+    pub memory_total_bytes: u64,
+    /// C:\ (or the first fixed disk).
+    pub system_disk_total_bytes: Option<u64>,
+    pub system_disk_free_bytes: Option<u64>,
+    pub tpm_version: Option<String>,
+    pub secure_boot: Option<bool>,
+    pub reboot_pending: bool,
 }
 
 /// Server technician role (T-806); each includes the ones before it.

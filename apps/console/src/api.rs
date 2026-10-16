@@ -112,6 +112,42 @@ impl Client {
             .await
     }
 
+    pub async fn software_report(&self, q: &str) -> Result<Vec<SoftwareReportRow>, String> {
+        self.get(
+            self.http
+                .get(format!("{}/api/v1/reports/software", self.base))
+                .query(&[("q", q)]),
+        )
+        .await
+    }
+
+    pub async fn software_devices(
+        &self,
+        name: &str,
+        version: Option<&str>,
+    ) -> Result<Vec<ReportDevice>, String> {
+        // An entry without a version is matched by an empty version.
+        self.get(
+            self.http
+                .get(format!("{}/api/v1/reports/software/devices", self.base))
+                .query(&[("name", name), ("version", version.unwrap_or(""))]),
+        )
+        .await
+    }
+
+    pub async fn os_report(&self) -> Result<Vec<OsReportRow>, String> {
+        self.get(self.http.get(format!("{}/api/v1/reports/os", self.base)))
+            .await
+    }
+
+    pub async fn hardware_report(&self) -> Result<Vec<HardwareReportRow>, String> {
+        self.get(
+            self.http
+                .get(format!("{}/api/v1/reports/hardware", self.base)),
+        )
+        .await
+    }
+
     pub async fn groups(&self) -> Result<Vec<DeviceGroup>, String> {
         self.get(self.http.get(format!("{}/api/v1/groups", self.base)))
             .await

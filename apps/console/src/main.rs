@@ -6,6 +6,7 @@ mod creds;
 mod direct;
 mod groups;
 mod jobs;
+mod reports;
 
 use iced::widget::{
     Space, button, checkbox, column, container, pick_list, progress_bar, row, rule, scrollable,
@@ -100,6 +101,7 @@ impl Settings {
 enum Page {
     Devices,
     Jobs,
+    Reports,
     Direct,
     Settings,
 }
@@ -243,6 +245,7 @@ enum Message {
     Job(jobs::JobMsg),
     Group(groups::GroupMsg),
     MeLoaded(Result<TechnicianInfo, String>),
+    Report(reports::ReportMsg),
 }
 
 /// How many endpoints a bulk run works on at once.
@@ -722,6 +725,7 @@ struct Console {
     groups: groups::GroupsState,
     /// The signed-in server technician's role and scope (`GET /api/v1/me`).
     me: Option<Result<TechnicianInfo, String>>,
+    reports: reports::ReportsState,
 }
 
 impl Console {
@@ -833,6 +837,7 @@ impl Console {
             jobs: jobs::JobsState::new(),
             groups: groups::GroupsState::new(),
             me: None,
+            reports: reports::ReportsState::new(),
         };
         let task = if configured {
             Task::batch([c.search(), c.load_groups(), c.load_me()])
@@ -996,10 +1001,14 @@ impl Console {
                 if p == Page::Jobs && !self.settings.token.is_empty() {
                     return self.jobs_refresh();
                 }
+                if p == Page::Reports && !self.settings.token.is_empty() {
+                    return self.reports_load();
+                }
             }
             Message::Job(m) => return self.jobs_update(m),
             Message::Group(m) => return self.groups_update(m),
             Message::MeLoaded(r) => self.me = Some(r),
+            Message::Report(m) => return self.reports_update(m),
             Message::QueryChanged(q) => self.query = q,
             Message::Search => return self.search(),
             Message::Refresh => {
@@ -1923,6 +1932,7 @@ impl Console {
                 Space::new().height(16),
                 nav("Devices", Page::Devices),
                 nav("Jobs", Page::Jobs),
+                nav("Reports", Page::Reports),
                 nav("Direct", Page::Direct),
                 nav("Settings", Page::Settings),
                 Space::new().height(Length::Fill),
@@ -1948,6 +1958,7 @@ impl Console {
         let main: Element<_> = match self.page {
             Page::Devices => self.devices_view(),
             Page::Jobs => self.jobs_view(),
+            Page::Reports => self.reports_view(),
             Page::Direct => self.direct_view(),
             Page::Settings => self.settings_view(),
         };
