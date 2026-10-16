@@ -10,6 +10,7 @@ Requirements live in [PLAN.md](PLAN.md). Work is tracked in [TASKS.md](TASKS.md)
 | `apps/server` | `tervano-server`: axum + sqlx/SQLite. `src/lib.rs` = API, `src/main.rs` = CLI, `migrations/` = schema, `tests/api.rs` = in-process API tests. |
 | `apps/agent` | `TervanoAgent.exe`: `collect.rs` (OS data), `service.rs` (SCM), `main.rs` (config, enroll, report loop). |
 | `apps/console` | `TervanoConsole.exe`: Iced 0.14 GUI. `api.rs` = server client. |
+| `packaging/` | Service and deployment files (`linux/`: systemd unit + server.example.toml). Test changes on the target OS before marking them done. |
 
 Add a new crate under `crates/` only when two apps need the same non-wire code. Don't pre-create the crates listed in PLAN §4 until there is code for them.
 

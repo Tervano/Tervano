@@ -1,0 +1,10 @@
+# Copy to /etc/tervano/server.toml for the systemd unit (packaging/linux/tervano-server.service).
+# Every option is described in apps/server/server.example.toml. Paths are absolute because the
+# service runs from /var/lib/tervano.
+listen = "0.0.0.0:8470"
+database_url = "sqlite:///var/lib/tervano/tervano.db?mode=rwc"
+# Required off loopback. Keep the key readable only by root and the tervano group (0640).
+tls_cert = "/etc/tervano/tls/server.pem"
+tls_key = "/etc/tervano/tls/server-key.pem"
+# audit_retention_days = 365
+# audit_archive_dir = "/var/lib/tervano/audit"

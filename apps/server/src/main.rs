@@ -187,6 +187,27 @@ fn load_config(path: &PathBuf) -> anyhow::Result<Config> {
     Ok(cfg)
 }
 
+/// Ctrl+C, or SIGTERM on Unix (what systemd and container runtimes send to stop a service).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("cannot listen for SIGTERM: {e}; only Ctrl+C stops gracefully")
+            }
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+}
+
 fn tech_token_duration(hours: u64) -> anyhow::Result<Duration> {
     anyhow::ensure!(
         (1..=MAX_TECH_TOKEN_HOURS).contains(&hours),
@@ -209,6 +230,8 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
+        // Colour codes only for a terminal, not the journal or a log file.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
     let cli = Cli::parse();
     // Certificate commands need no config or database (usable in serverless deployments).
@@ -245,7 +268,8 @@ async fn main() -> anyhow::Result<()> {
             let handle = axum_server::Handle::new();
             let h = handle.clone();
             tokio::spawn(async move {
-                let _ = tokio::signal::ctrl_c().await;
+                shutdown_signal().await;
+                tracing::info!("shutting down: finishing in-flight requests (up to 10 s)");
                 h.graceful_shutdown(Some(Duration::from_secs(10)));
             });
             match (&cfg.tls_cert, &cfg.tls_key) {

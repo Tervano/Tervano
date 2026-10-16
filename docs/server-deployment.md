@@ -1,11 +1,39 @@
 # Server deployment in the current build
 
-The Server currently runs as a foreground `tervano-server serve` process. A
-Windows service, systemd unit, container, and installer are planned
-([T-117](../TASKS.md), [T-952](../TASKS.md)). The [example
+The Server runs as a foreground `tervano-server serve` process or, on Linux,
+as a systemd service (below). A Windows service, container image, and installer
+are planned ([T-117](../TASKS.md), [T-952](../TASKS.md)). Ctrl+C or SIGTERM
+stops it gracefully: it stops accepting connections and lets requests in flight
+finish for up to 10 seconds. The [example
 configuration](../apps/server/server.example.toml) shows the current options.
 Use a separate directory for `server.toml`, SQLite, and TLS material, and
 restrict its filesystem permissions to the Server account and administrators.
+
+## Linux (systemd)
+
+[packaging/linux](../packaging/linux) has a sandboxed unit and an example
+`server.toml` for it. As root:
+
+```bash
+useradd --system --home-dir /var/lib/tervano --shell /usr/sbin/nologin tervano
+install -m 0755 tervano-server /usr/local/bin/tervano-server
+install -d -m 0750 -o root -g tervano /etc/tervano /etc/tervano/tls
+install -m 0640 -o root -g tervano packaging/linux/server.example.toml /etc/tervano/server.toml
+install -m 0644 packaging/linux/tervano-server.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now tervano-server
+```
+
+Put the TLS certificate and key in `/etc/tervano/tls` (key `0640 root:tervano`),
+or set `listen` to a loopback address behind a TLS-terminating proxy. The
+database lives in `/var/lib/tervano`. Run management commands as the service
+user against the same configuration, for example
+`sudo -u tervano tervano-server --config /etc/tervano/server.toml tech create --name alice`.
+Logs go to the journal (`journalctl -u tervano-server`); set `RUST_LOG` with a
+drop-in (`systemctl edit tervano-server`) to change verbosity.
+
+The unit runs the Server without capabilities, with a read-only file system
+except its state directory, private `/tmp` and devices, and a system-call
+allow-list. `systemd-analyze security tervano-server` reports the result.
 
 ## Listener and storage
 

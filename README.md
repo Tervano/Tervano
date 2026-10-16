@@ -39,6 +39,7 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Server | TLS | Implemented | Win/Linux | rustls; plaintext only on loopback. `tervano-server cert init` creates a private CA + server cert |
 | Server | Audit log | Partial | Win/Linux | Append-only (DB triggers); enrollments, auth failures, token/technician creation and lifecycle. `GET /api/v1/audit` includes socket peer IP for HTTP events; behind a proxy this is the proxy IP |
 | Server | Technician API tokens | Partial | Win/Linux | New tokens expire after 30 days by default; `tech rotate` replaces the old token and `tech revoke` disables it. CLI management only; direct-channel certificate lifecycle remains separate work |
+| Server | Linux service | Implemented | Linux | systemd unit with a sandboxed service account (`packaging/linux`); graceful stop on SIGTERM. Windows service and container image planned (T-814, T-815) |
 | Server | Roles and device scopes | Implemented | Win/Linux | Viewer, operator and admin roles; a technician can be limited to the devices of chosen groups (static or saved search) (`tech create --role --scope`, `tech set`). Denials are audited |
 | Agent | Report hostname, OS, IPs, signed-in users | Implemented | Windows | Verified on Windows 11 Home 25H2 (build 26200), workgroup machine. Not yet tested domain-joined |
 | Agent | Change detection | Partial | Windows | Poll-and-diff every `poll_secs`; event-driven notifications are T-209/T-210 |
