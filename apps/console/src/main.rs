@@ -95,6 +95,7 @@ enum Message {
     SearchDone(u64, Result<Vec<DeviceSummary>, String>),
     Select(uuid::Uuid),
     DetailsDone(Result<DeviceDetails, String>),
+    InventoryDone(uuid::Uuid, Result<Option<InventoryReport>, String>),
     ServerUrlChanged(String),
     TokenChanged(String),
     CaCertChanged(String),
@@ -571,6 +572,8 @@ struct Console {
     devices: Result<Vec<DeviceSummary>, String>,
     selected: Option<uuid::Uuid>,
     details: Option<Result<DeviceDetails, String>>,
+    /// Server-stored inventory of the selected device.
+    inventory: Option<(uuid::Uuid, Result<Option<InventoryReport>, String>)>,
     /// Server push connected; polling is only the fallback while this is false.
     live: bool,
     /// A pushed change arrived; refresh once the debounce tick fires.
@@ -676,6 +679,7 @@ impl Console {
             devices: Ok(Vec::new()),
             selected: None,
             details: None,
+            inventory: None,
             live: false,
             dirty: false,
             direct_input: String::new(),
@@ -769,10 +773,16 @@ impl Console {
 
     fn load_details(&self, id: uuid::Uuid) -> Task<Message> {
         let client = self.client();
-        Task::perform(
-            async move { client?.details(id).await },
-            Message::DetailsDone,
-        )
+        let inv_client = self.client();
+        Task::batch([
+            Task::perform(
+                async move { client?.details(id).await },
+                Message::DetailsDone,
+            ),
+            Task::perform(async move { inv_client?.inventory(id).await }, move |r| {
+                Message::InventoryDone(id, r)
+            }),
+        ])
     }
 
     fn creds(&self) -> direct::Creds {
@@ -896,6 +906,11 @@ impl Console {
                 // Drop stale responses for a previously selected device.
                 if r.as_ref().map_or(true, |d| Some(d.id) == self.selected) {
                     self.details = Some(r);
+                }
+            }
+            Message::InventoryDone(id, r) => {
+                if Some(id) == self.selected {
+                    self.inventory = Some((id, r));
                 }
             }
             Message::ServerUrlChanged(s) => self.draft.server_url = s,
@@ -1754,15 +1769,93 @@ impl Console {
             Some(Err(e)) => return error_box(e),
             Some(Ok(d)) => d,
         };
+        let mut extra = vec![
+            ("Last seen", ago(d.last_seen)),
+            ("Enrolled", ago(d.enrolled_at)),
+            ("Device ID", d.id.to_string()),
+        ];
+        // Stored snapshot from the server; no direct connection needed.
+        match self
+            .inventory
+            .as_ref()
+            .filter(|(id, _)| *id == d.id)
+            .map(|(_, r)| r)
+        {
+            None => extra.push(("Inventory", "loading…".into())),
+            Some(Err(e)) => extra.push(("Inventory", format!("unavailable: {e}"))),
+            Some(Ok(None)) => extra.push(("Inventory", "not received yet".into())),
+            Some(Ok(Some(inv))) => {
+                let hw = &inv.hardware;
+                let gb = |b: u64| format!("{:.0} GB", b as f64 / 1_073_741_824.0);
+                let model = [hw.manufacturer.as_deref(), hw.model.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                extra.push((
+                    "Model",
+                    if model.is_empty() {
+                        "unknown".into()
+                    } else {
+                        model
+                    },
+                ));
+                extra.push((
+                    "Serial",
+                    hw.serial_number.clone().unwrap_or_else(|| "unknown".into()),
+                ));
+                extra.push((
+                    "CPU",
+                    format!("{} ({} logical)", hw.cpu_model, hw.cpu_logical_cores),
+                ));
+                extra.push(("Memory", gb(hw.memory_total_bytes)));
+                extra.push((
+                    "Disks",
+                    hw.disks
+                        .iter()
+                        .map(|k| {
+                            format!(
+                                "{} {} free of {}",
+                                k.mount_point,
+                                gb(k.free_bytes),
+                                gb(k.total_bytes)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+                ));
+                extra.push((
+                    "Security",
+                    format!(
+                        "TPM {} · Secure Boot {}",
+                        hw.tpm_version.as_deref().unwrap_or("not detected"),
+                        match hw.secure_boot {
+                            Some(true) => "on",
+                            Some(false) => "off",
+                            None => "unknown",
+                        }
+                    ),
+                ));
+                extra.push((
+                    "Software",
+                    format!("{} applications", inv.software.apps.len()),
+                ));
+                extra.push((
+                    "Restart",
+                    if inv.software.reboot_pending.is_empty() {
+                        "not pending".into()
+                    } else {
+                        format!("pending ({})", inv.software.reboot_pending.join("; "))
+                    },
+                ));
+                extra.push(("Inventory", format!("collected {}", ago(inv.collected_at))));
+            }
+        }
         state_panel(
             &d.state,
             d.online,
             if d.online { "Online" } else { "Offline" },
-            vec![
-                ("Last seen", ago(d.last_seen)),
-                ("Enrolled", ago(d.enrolled_at)),
-                ("Device ID", d.id.to_string()),
-            ],
+            extra,
         )
     }
 

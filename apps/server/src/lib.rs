@@ -114,6 +114,9 @@ pub struct AppState {
 }
 
 const MAX_API_BODY: usize = 256 * 1024;
+/// Software inventories run ~240 bytes per app; this covers several thousand apps.
+const MAX_INVENTORY_BODY: usize = 2 * 1024 * 1024;
+const INVENTORY_PATH: &str = "/api/v1/inventory";
 const MAX_IN_FLIGHT: usize = 128;
 const MAX_STREAMS: usize = 256;
 const MAX_RATE_PEERS: usize = 65_536;
@@ -442,6 +445,11 @@ pub fn app(state: AppState) -> Router {
     let api = Router::new()
         .route("/enroll", post(enroll))
         .route("/events", post(ingest_events))
+        .route(
+            "/inventory",
+            post(ingest_inventory).layer(axum::extract::DefaultBodyLimit::max(MAX_INVENTORY_BODY)),
+        )
+        .route("/devices/{id}/inventory", get(device_inventory))
         .route("/devices", get(search_devices))
         .route("/devices/{id}", get(device_details))
         .route("/devices/{id}/events", get(device_events))
@@ -465,7 +473,14 @@ async fn admit_request(State(s): State<AppState>, req: Request, next: Next) -> R
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<usize>().ok())
-        .is_some_and(|length| length > MAX_API_BODY)
+        .is_some_and(|length| {
+            let limit = if req.uri().path() == INVENTORY_PATH {
+                MAX_INVENTORY_BODY
+            } else {
+                MAX_API_BODY
+            };
+            length > limit
+        })
     {
         return err(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
     }
@@ -1106,6 +1121,59 @@ struct EventHistoryParams {
     before: Option<i64>,
     #[serde(default = "default_limit")]
     limit: u32,
+}
+
+/// Stores the latest inventory snapshot from an enrolled device (replacing the previous one).
+async fn ingest_inventory(
+    State(s): State<AppState>,
+    dev: DeviceAuth,
+    Json(report): Json<InventoryReport>,
+) -> Result<StatusCode, AppError> {
+    if report.software.apps.len() > 20_000 || report.hardware.disks.len() > 256 {
+        return Err(AppError::new(err(
+            StatusCode::BAD_REQUEST,
+            "inventory exceeds sanity limits",
+        )));
+    }
+    sqlx::query(
+        "INSERT INTO device_inventory (device_id, collected_at, received_at, report_json)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(device_id) DO UPDATE SET collected_at = excluded.collected_at,
+             received_at = excluded.received_at, report_json = excluded.report_json",
+    )
+    .bind(&dev.id)
+    .bind(report.collected_at)
+    .bind(now_millis())
+    .bind(serde_json::to_string(&report).expect("report serializes"))
+    .execute(&s.db)
+    .await?;
+    tracing::info!(device = %dev.id, apps = report.software.apps.len(), "inventory stored");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Latest inventory snapshot of a device; 404 until the agent has sent one.
+async fn device_inventory(
+    State(s): State<AppState>,
+    _tech: TechAuth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<InventoryReport>, AppError> {
+    let json: Option<String> = sqlx::query_scalar(
+        "SELECT i.report_json FROM device_inventory i JOIN devices d ON d.id = i.device_id
+         WHERE i.device_id = ? AND d.revoked = 0",
+    )
+    .bind(id.to_string())
+    .fetch_optional(&s.db)
+    .await?;
+    let json = json.ok_or_else(|| {
+        AppError::new(err(
+            StatusCode::NOT_FOUND,
+            "no inventory received from this device yet",
+        ))
+    })?;
+    serde_json::from_str(&json).map(Json).map_err(|e| {
+        tracing::error!(device = %id, "corrupt inventory: {e}");
+        AppError::new(err(StatusCode::INTERNAL_SERVER_ERROR, "corrupt inventory"))
+    })
 }
 
 async fn device_events(

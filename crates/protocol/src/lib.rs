@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.13";
+pub const PROTOCOL_VERSION: &str = "1.14";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -621,6 +621,15 @@ pub struct Hotfix {
     /// As Windows reports it, usually `M/D/YYYY`.
     pub installed_on: Option<String>,
     pub installed_by: Option<String>,
+}
+
+/// Hardware + software snapshot an agent sends to the server (`POST /api/v1/inventory`) at
+/// startup and daily — never on the heartbeat path. The server keeps the latest per device.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InventoryReport {
+    pub collected_at: Millis,
+    pub hardware: HardwareInventory,
+    pub software: SoftwareInventory,
 }
 
 /// SSE event names on `GET /api/v1/stream`.

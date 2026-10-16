@@ -100,6 +100,28 @@ impl Client {
         .await
     }
 
+    /// Latest inventory snapshot the agent sent; `None` until it has sent one.
+    pub async fn inventory(&self, id: uuid::Uuid) -> Result<Option<InventoryReport>, String> {
+        // Connection errors surface through the details call; keep this one terse.
+        let res = self
+            .http
+            .get(format!("{}/api/v1/devices/{id}/inventory", self.base))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        match res.status() {
+            // Nothing received yet is normal for a newly enrolled agent.
+            reqwest::StatusCode::NOT_FOUND => Ok(None),
+            s if s.is_success() => res
+                .json()
+                .await
+                .map(Some)
+                .map_err(|e| format!("Unexpected server response: {e}")),
+            s => Err(format!("server error {s}")),
+        }
+    }
+
     pub async fn details(&self, id: uuid::Uuid) -> Result<DeviceDetails, String> {
         self.get(self.http.get(format!("{}/api/v1/devices/{id}", self.base)))
             .await

@@ -198,7 +198,22 @@ impl Client {
             .await?;
         Ok(check(res).await?.json().await?)
     }
+
+    async fn send_inventory(&self, secret: &str, report: &InventoryReport) -> anyhow::Result<()> {
+        let res = self
+            .http
+            .post(format!("{}/api/v1/inventory", self.base))
+            .bearer_auth(secret)
+            .json(report)
+            .send()
+            .await?;
+        check(res).await.map(|_| ())
+    }
 }
+
+/// Inventory is sent at startup and then daily; a failed upload is retried sooner.
+const INVENTORY_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+const INVENTORY_RETRY: Duration = Duration::from_secs(15 * 60);
 
 async fn check(res: reqwest::Response) -> anyhow::Result<reqwest::Response> {
     if res.status().is_success() {
@@ -292,6 +307,7 @@ async fn report(
     let mut last_sent = std::time::Instant::now();
     let mut first = true;
     let mut backoff = poll;
+    let mut next_inventory = std::time::Instant::now();
 
     loop {
         let state = collect::device_state();
@@ -356,6 +372,29 @@ async fn report(
                     backoff = (backoff * 2).min(max_backoff);
                 }
             }
+        }
+        // Only once the server knows this device (first state report accepted).
+        if !first && std::time::Instant::now() >= next_inventory {
+            let report = tokio::task::spawn_blocking(|| InventoryReport {
+                collected_at: now_millis(),
+                hardware: inventory::hardware(),
+                software: software::inventory(),
+            })
+            .await?;
+            next_inventory = std::time::Instant::now()
+                + match client
+                    .send_inventory(&identity.device_secret, &report)
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!(apps = report.software.apps.len(), "inventory reported");
+                        INVENTORY_EVERY
+                    }
+                    Err(e) => {
+                        tracing::warn!("inventory upload failed: {e:#}; retrying in 15 min");
+                        INVENTORY_RETRY
+                    }
+                };
         }
         if !sleep_or_stop(wait, &mut stop).await {
             break;
