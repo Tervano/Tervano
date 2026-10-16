@@ -31,6 +31,8 @@ pub struct ReportsState {
     os: Option<Result<Vec<OsReportRow>, String>>,
     hardware: Option<Result<Vec<HardwareReportRow>, String>>,
     notice: Option<Result<String, String>>,
+    /// Scroll and sort of each [`TableId`], indexed by it.
+    pub(crate) views: [TableView; 4],
 }
 
 impl ReportsState {
@@ -43,6 +45,7 @@ impl ReportsState {
             os: None,
             hardware: None,
             notice: None,
+            views: [TableView::default(); 4],
         }
     }
 }
@@ -102,7 +105,10 @@ impl Console {
             }
             ReportMsg::Filter(s) => r.filter = s,
             ReportMsg::Load => return self.reports_load(),
-            ReportMsg::Software(x) => r.software = Some(x),
+            ReportMsg::Software(x) => {
+                r.software = Some(x);
+                return self.reset_table(TableId::Software);
+            }
             ReportMsg::Pick(name, version) => {
                 r.picked = Some(((name.clone(), version.clone()), None));
                 let client = self.client();
@@ -123,8 +129,14 @@ impl Console {
                     *devices = Some(x);
                 }
             }
-            ReportMsg::Os(x) => r.os = Some(x),
-            ReportMsg::Hardware(x) => r.hardware = Some(x),
+            ReportMsg::Os(x) => {
+                r.os = Some(x);
+                return self.reset_table(TableId::Os);
+            }
+            ReportMsg::Hardware(x) => {
+                r.hardware = Some(x);
+                return self.reset_table(TableId::Hardware);
+            }
             ReportMsg::OpenDevice(id) => {
                 self.page = Page::Devices;
                 return self.update(Message::Select(id));
@@ -213,9 +225,13 @@ impl Console {
                 None => centered("Loading…"),
                 Some(Err(e)) => error_box(e),
                 Some(Ok(rows)) => table(
+                    TableId::Os,
+                    &r.views[TableId::Os as usize],
                     &["Operating system", "Version", "Build", "Devices", "Online"],
                     &[3, 1, 2, 1, 1],
-                    rows.iter().map(|o| {
+                    rows.len(),
+                    |i| {
+                        let o = &rows[i];
                         vec![
                             o.name.clone(),
                             o.version.clone(),
@@ -223,7 +239,7 @@ impl Console {
                             o.devices.to_string(),
                             o.online.to_string(),
                         ]
-                    }),
+                    },
                     None::<fn(usize) -> Message>,
                 ),
             },
@@ -231,6 +247,8 @@ impl Console {
                 None => centered("Loading…"),
                 Some(Err(e)) => error_box(e),
                 Some(Ok(rows)) => table(
+                    TableId::Hardware,
+                    &r.views[TableId::Hardware as usize],
                     &[
                         "Computer",
                         "Model",
@@ -243,7 +261,8 @@ impl Console {
                         "Inventory",
                     ],
                     &[2, 2, 3, 1, 2, 1, 1, 1, 1],
-                    rows.iter().map(hardware_cells),
+                    rows.len(),
+                    |i| hardware_cells(&rows[i]),
                     Some(|i: usize| {
                         let id = rows[i].device_id;
                         Message::Report(ReportMsg::OpenDevice(id))
@@ -265,16 +284,20 @@ impl Console {
             Some(Ok(rows)) => rows,
         };
         let list = table(
+            TableId::Software,
+            &r.views[TableId::Software as usize],
             &["Name", "Version", "Publisher", "Devices"],
             &[4, 2, 3, 1],
-            rows.iter().map(|s| {
+            rows.len(),
+            |i| {
+                let s = &rows[i];
                 vec![
                     s.name.clone(),
                     s.version.clone().unwrap_or_default(),
                     s.publisher.clone().unwrap_or_default(),
                     s.devices.to_string(),
                 ]
-            }),
+            },
             Some(|i: usize| {
                 let s = &rows[i];
                 Message::Report(ReportMsg::Pick(s.name.clone(), s.version.clone()))
@@ -354,55 +377,184 @@ fn hardware_cells(h: &HardwareReportRow) -> Vec<String> {
     ]
 }
 
-/// A simple text table; rows are clickable when `on_row` is given.
+/// The large tables, each with its own scroll position and sort (T-307).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TableId {
+    Software,
+    Os,
+    Hardware,
+    Compliance,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TableView {
+    /// Scroll offset and viewport height (px), from the scrollable.
+    offset: f32,
+    height: f32,
+    /// Sorted column and whether ascending; `None` keeps the server's order.
+    sort: Option<(usize, bool)>,
+}
+
+impl Default for TableView {
+    fn default() -> Self {
+        Self {
+            offset: 0.0,
+            // Until the first scroll event: enough rows for a tall window.
+            height: 1200.0,
+            sort: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum TableMsg {
+    Scrolled(f32, f32),
+    Sort(usize),
+}
+
+/// Fixed so only the visible rows need to exist (text that does not fit is clipped).
+const ROW_H: f32 = 26.0;
+
+fn scroll_id(id: TableId) -> iced::widget::Id {
+    iced::widget::Id::new(match id {
+        TableId::Software => "table-software",
+        TableId::Os => "table-os",
+        TableId::Hardware => "table-hardware",
+        TableId::Compliance => "table-compliance",
+    })
+}
+
+impl Console {
+    pub(crate) fn table_update(&mut self, id: TableId, msg: TableMsg) -> Task<Message> {
+        let v = &mut self.reports.views[id as usize];
+        match msg {
+            TableMsg::Scrolled(offset, height) => {
+                v.offset = offset;
+                v.height = height;
+            }
+            TableMsg::Sort(col) => {
+                v.sort = match v.sort {
+                    Some((c, true)) if c == col => Some((col, false)),
+                    Some((c, false)) if c == col => None,
+                    _ => Some((col, true)),
+                };
+                return self.reset_table(id);
+            }
+        }
+        Task::none()
+    }
+
+    /// Back to the top (new data, new tab or new sort), for both the widget and our window.
+    pub(crate) fn reset_table(&mut self, id: TableId) -> Task<Message> {
+        self.reports.views[id as usize].offset = 0.0;
+        iced::widget::operation::snap_to(
+            scroll_id(id),
+            iced::widget::scrollable::RelativeOffset::START,
+        )
+    }
+}
+
+/// Orders numbers by value ("125.61 GB" < "1,024 GB" style values compare by their leading
+/// number) and everything else case-insensitively.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let number = |s: &str| {
+        let t: String = s
+            .trim()
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == ',')
+            .filter(|c| *c != ',')
+            .collect();
+        t.parse::<f64>().ok()
+    };
+    match (number(a), number(b)) {
+        (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+        _ => a.to_lowercase().cmp(&b.to_lowercase()),
+    }
+}
+
+/// A virtualized text table: only the rows in view are built (T-307), with sortable headers.
+/// `cells(i)` gives row `i`'s texts; `on_row(i)` makes rows clickable (with the original index).
 pub(crate) fn table<'a>(
+    id: TableId,
+    view: &TableView,
     headers: &[&'static str],
     widths: &[u16],
-    rows: impl Iterator<Item = Vec<String>>,
+    len: usize,
+    cells: impl Fn(usize) -> Vec<String>,
     on_row: Option<impl Fn(usize) -> Message>,
 ) -> Element<'a, Message> {
-    let cells = |values: Vec<Element<'a, Message>>| {
-        row(values
-            .into_iter()
-            .zip(widths)
-            .map(|(v, w)| container(v).width(Length::FillPortion(*w)).into()))
+    let line = |values: Vec<Element<'a, Message>>| {
+        row(values.into_iter().zip(widths).map(|(v, w)| {
+            container(v)
+                .width(Length::FillPortion(*w))
+                .height(ROW_H)
+                .clip(true)
+                .into()
+        }))
         .spacing(8)
+        .align_y(Alignment::Center)
     };
-    let header = cells(
-        headers
-            .iter()
-            .map(|h| text(*h).size(12).style(text::secondary).into())
-            .collect(),
-    );
-    // shortcut: renders every row (server caps rows at 5000); virtualized lists are T-307.
-    let body: Vec<Element<_>> = rows
-        .enumerate()
-        .map(|(i, values)| {
-            let line = cells(
-                values
-                    .into_iter()
-                    .map(|v| {
-                        text(v)
-                            .size(13)
-                            .wrapping(text::Wrapping::WordOrGlyph)
-                            .into()
-                    })
-                    .collect(),
-            );
-            match &on_row {
-                Some(f) => button(line)
-                    .width(Length::Fill)
-                    .padding([3, 6])
-                    .style(button::text)
-                    .on_press(f(i))
-                    .into(),
-                None => container(line).padding([3, 6]).into(),
-            }
-        })
-        .collect();
+    let header = row(headers.iter().enumerate().zip(widths).map(|((i, h), w)| {
+        let mark = match view.sort {
+            Some((c, true)) if c == i => " ▲",
+            Some((c, false)) if c == i => " ▼",
+            _ => "",
+        };
+        button(text(format!("{h}{mark}")).size(12).style(text::secondary))
+            .padding(0)
+            .style(button::text)
+            .width(Length::FillPortion(*w))
+            .on_press(Message::Table(id, TableMsg::Sort(i)))
+            .into()
+    }))
+    .spacing(8);
+
+    let mut order: Vec<usize> = (0..len).collect();
+    if let Some((col, asc)) = view.sort {
+        let keys: Vec<String> = (0..len)
+            .map(|i| cells(i).into_iter().nth(col).unwrap_or_default())
+            .collect();
+        order.sort_by(|&a, &b| {
+            let o = natural_cmp(&keys[a], &keys[b]);
+            if asc { o } else { o.reverse() }
+        });
+    }
+    // Rows are ROW_H + 1 (spacing) apart; build a little more than the viewport.
+    let pitch = ROW_H + 1.0;
+    let first = ((view.offset / pitch).floor() as usize).min(len);
+    let shown = ((view.height / pitch).ceil() as usize + 2).min(len - first);
+    let mut body = column![Space::new().height(first as f32 * pitch)].spacing(1);
+    for &i in &order[first..first + shown] {
+        let values = line(
+            cells(i)
+                .into_iter()
+                .map(|v| text(v).size(13).wrapping(text::Wrapping::None).into())
+                .collect(),
+        );
+        let entry: Element<_> = match &on_row {
+            Some(f) => button(values)
+                .width(Length::Fill)
+                .height(ROW_H)
+                .padding([0, 6])
+                .style(button::text)
+                .on_press(f(i))
+                .into(),
+            None => container(values).height(ROW_H).padding([0, 6]).into(),
+        };
+        body = body.push(entry);
+    }
+    body = body.push(Space::new().height((len - first - shown) as f32 * pitch));
     column![
         container(header.padding([4, 6])).style(container::rounded_box),
-        scroll(column(body).spacing(1)).height(Length::Fill),
+        scroll(body)
+            .id(scroll_id(id))
+            .on_scroll(move |vp| {
+                Message::Table(
+                    id,
+                    TableMsg::Scrolled(vp.absolute_offset().y, vp.bounds().height),
+                )
+            })
+            .height(Length::Fill),
     ]
     .spacing(4)
     .into()

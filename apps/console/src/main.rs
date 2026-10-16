@@ -256,6 +256,7 @@ enum Message {
     TicketLoaded(String, Result<TicketResponse, String>),
     Report(reports::ReportMsg),
     Navigate(nav::NavMsg),
+    Table(reports::TableId, reports::TableMsg),
     Compliance(compliance::ComplianceMsg),
 }
 
@@ -1100,6 +1101,7 @@ impl Console {
             },
             Message::Report(m) => return self.reports_update(m),
             Message::Navigate(m) => return self.nav_update(m),
+            Message::Table(id, m) => return self.table_update(id, m),
             Message::Compliance(m) => return self.compliance_update(m),
             Message::QueryChanged(q) => self.query = q,
             Message::Search => {
@@ -2001,7 +2003,7 @@ impl Console {
         }
         if self.dirty {
             // Debounce: a burst of pushed changes becomes one refresh.
-            // shortcut: re-runs the whole current search per burst; patch rows in place if this gets heavy (T-307).
+            // shortcut: re-runs the whole current search per burst; patch rows in place if this gets heavy (T-816).
             subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Refresh));
         } else if !self.live {
             subs.push(iced::time::every(Duration::from_secs(15)).map(|_| Message::Refresh));
@@ -2132,7 +2134,7 @@ impl Console {
                 ]
                 .spacing(8)
                 .padding([6, 10]);
-                // shortcut: renders every row (server caps at 100); virtualization is T-307.
+                // shortcut: renders every row (server caps at 100); virtualization is T-816.
                 let rows = devices.iter().map(|d| {
                     let selected = self.selected == Some(d.id);
                     let (id, host) = (d.id, d.hostname.clone());
@@ -3104,7 +3106,7 @@ impl Console {
             Some((_, Ok(l))) => l,
         };
         let drives = listing.path.is_empty();
-        // shortcut: renders every entry; folders with tens of thousands of files need T-307.
+        // shortcut: renders every entry; folders with tens of thousands of files need T-816.
         let rows = listing.entries.iter().map(|e| {
             let name: Element<_> = match &self.files_rename {
                 Some((old, new)) if old == &e.name => row![
@@ -3583,7 +3585,7 @@ impl Console {
             Space::new().width(80),
         ]
         .spacing(4);
-        // shortcut: renders every matching row (a few hundred); virtualize with T-307.
+        // shortcut: renders every matching row (a few hundred); virtualize with T-816.
         let rows = shown.iter().map(|a| {
             // YYYYMMDD → YYYY-MM-DD when it looks like one.
             let date = a.install_date.as_deref().map(|d| {
@@ -3950,7 +3952,7 @@ impl Console {
             Space::new().width(170),
         ]
         .spacing(4);
-        // shortcut: renders every matching row (~300); virtualize with T-307.
+        // shortcut: renders every matching row (~300); virtualize with T-816.
         let rows = shown.iter().map(|s| {
             let ctl =
                 |a: ServiceAction| Some(Message::SvcAsk(SvcChange::Control(s.name.clone(), a)));
@@ -4116,7 +4118,7 @@ impl Console {
         ]
         .spacing(4);
 
-        // shortcut: renders every matching row (a few hundred); virtualize with T-307.
+        // shortcut: renders every matching row (a few hundred); virtualize with T-816.
         let rows = shown.iter().map(|p| {
             row![
                 text(&p.name).size(13).width(Length::FillPortion(4)),

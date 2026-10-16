@@ -2,7 +2,7 @@
 //! turn a check's remediation script into a job for the failing devices. The job goes through the
 //! normal Jobs form and confirmation, so nothing runs from this tab directly.
 
-use crate::reports::{Loaded, table};
+use crate::reports::{Loaded, TableId, table};
 use crate::{
     Console, Message, SHELLS, ShellChoice, centered, csv_cell, downloads_dir, error_box, scroll,
 };
@@ -220,6 +220,7 @@ impl Console {
                     && *open == id
                 {
                     *results = Some(r);
+                    return self.reset_table(TableId::Compliance);
                 }
             }
             ComplianceMsg::NewForm => {
@@ -546,9 +547,13 @@ impl Console {
             None => centered("Evaluating…"),
             Some(Err(e)) => error_box(e),
             Some(Ok(rows)) => table(
+                TableId::Compliance,
+                &self.reports.views[TableId::Compliance as usize],
                 &["Status", "Computer", "Found"],
                 &[1, 2, 4],
-                rows.iter().map(|r| {
+                rows.len(),
+                |i| {
+                    let r = &rows[i];
                     vec![
                         match r.status {
                             ComplianceStatus::Pass => "pass",
@@ -559,7 +564,7 @@ impl Console {
                         r.hostname.clone(),
                         r.detail.clone(),
                     ]
-                }),
+                },
                 Some(|i: usize| {
                     Message::Report(crate::reports::ReportMsg::OpenDevice(rows[i].device_id))
                 }),
