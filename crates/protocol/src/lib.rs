@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.16";
+pub const PROTOCOL_VERSION: &str = "1.17";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -679,6 +679,12 @@ pub struct JobCreate {
     /// Default 300, max 3600.
     pub timeout_secs: Option<u32>,
     pub devices: Vec<Uuid>,
+    /// Devices pick the job up no earlier than this (at most 90 days ahead). `None` = now.
+    #[serde(default)]
+    pub run_at: Option<Millis>,
+    /// At most this many devices run it at once (rolling). `None` = no limit.
+    #[serde(default)]
+    pub max_parallel: Option<u32>,
 }
 
 /// Where one device is in a job.
@@ -705,6 +711,10 @@ pub struct JobSummary {
     pub shell: Shell,
     pub script_sha256: String,
     pub timeout_secs: u32,
+    #[serde(default)]
+    pub run_at: Option<Millis>,
+    #[serde(default)]
+    pub max_parallel: Option<u32>,
     pub cancelled: bool,
     pub targets: u32,
     pub pending: u32,
@@ -747,6 +757,14 @@ pub struct AgentJob {
     pub shell: Shell,
     pub script: String,
     pub timeout_secs: u32,
+}
+
+/// Reply to `POST /api/v1/agent/jobs/{id}/progress`, which an agent sends every few seconds while
+/// it runs a job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobControl {
+    /// The technician cancelled the job: stop the script and report it cancelled.
+    pub cancel: bool,
 }
 
 /// Body of `POST /api/v1/agent/jobs/{id}/result`. `state` is never `running`.

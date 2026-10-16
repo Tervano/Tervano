@@ -518,6 +518,7 @@ pub fn app(state: AppState) -> Router {
         .route("/jobs/{id}", get(jobs::get_job))
         .route("/jobs/{id}/cancel", post(jobs::cancel_job))
         .route("/agent/jobs/claim", post(jobs::claim_job))
+        .route("/agent/jobs/{id}/progress", post(jobs::job_progress))
         .route(
             "/agent/jobs/{id}/result",
             post(jobs::job_result).layer(axum::extract::DefaultBodyLimit::max(MAX_JOB_RESULT_BODY)),

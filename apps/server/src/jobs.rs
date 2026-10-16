@@ -13,6 +13,10 @@ const MAX_NAME_CHARS: usize = 120;
 const DEFAULT_TIMEOUT: u32 = 300;
 /// A claimed target with no result this long after its timeout is marked failed.
 const RESULT_GRACE_MS: i64 = 10 * 60 * 1000;
+/// Agents check in this often while running a job; this long without one means it is gone.
+const PROGRESS_LOST_MS: i64 = 2 * 60 * 1000;
+/// Latest allowed `run_at`.
+const MAX_DELAY_MS: i64 = 90 * 24 * 60 * 60 * 1000;
 const STALE: &str = "no result from the device (agent stopped or lost the server while running it)";
 
 fn bad(msg: impl Into<String>) -> AppError {
@@ -54,17 +58,22 @@ fn cap_text(s: &mut String, cap: usize) -> bool {
     true
 }
 
-/// Marks targets whose agent never answered as failed, so a job always reaches an end state.
+/// Marks targets whose agent never answered as failed, so a job always reaches an end state:
+/// either it stopped checking in, or (agents that never check in) the timeout passed long ago.
 async fn expire_stale(db: &SqlitePool) -> Result<(), sqlx::Error> {
     let now = now_millis();
     sqlx::query(
         "UPDATE job_targets SET state = 'failed', error = ?, finished_at = ?
-         WHERE state = 'running' AND claimed_at
-             + (SELECT timeout_secs FROM jobs WHERE jobs.id = job_targets.job_id) * 1000 + ? < ?",
+         WHERE state = 'running' AND (
+             claimed_at + (SELECT timeout_secs FROM jobs WHERE jobs.id = job_targets.job_id) * 1000
+                 + ? < ?
+             OR progress_at + ? < ?)",
     )
     .bind(STALE)
     .bind(now)
     .bind(RESULT_GRACE_MS)
+    .bind(now)
+    .bind(PROGRESS_LOST_MS)
     .bind(now)
     .execute(db)
     .await?;
@@ -79,7 +88,7 @@ async fn summaries(
     let only = only.map(|id| id.to_string());
     let rows = sqlx::query(
         "SELECT j.id, j.name, j.created_by, j.created_at, j.shell, j.script_sha256, j.timeout_secs,
-                j.cancelled_at IS NOT NULL AS cancelled,
+                j.run_at, j.max_parallel, j.cancelled_at IS NOT NULL AS cancelled,
                 COUNT(t.device_id) AS targets,
                 IFNULL(SUM(t.state = 'pending'), 0) AS pending,
                 IFNULL(SUM(t.state = 'running'), 0) AS running,
@@ -109,6 +118,8 @@ async fn summaries(
                 shell: enum_parse(r.get("shell"))?,
                 script_sha256: r.get("script_sha256"),
                 timeout_secs: r.get::<i64, _>("timeout_secs") as u32,
+                run_at: r.get("run_at"),
+                max_parallel: r.get::<Option<i64>, _>("max_parallel").map(|n| n as u32),
                 cancelled: r.get("cancelled"),
                 targets,
                 pending,
@@ -149,6 +160,18 @@ pub(crate) async fn create_job(
     if !(1..=3600).contains(&timeout) {
         return Err(bad("timeout_secs must be 1-3600"));
     }
+    let now = now_millis();
+    // A start time in the past just means "now".
+    let run_at = req.run_at.filter(|&t| t > now);
+    if run_at.is_some_and(|t| t > now + MAX_DELAY_MS) {
+        return Err(bad("run_at can be at most 90 days ahead"));
+    }
+    if req
+        .max_parallel
+        .is_some_and(|n| n == 0 || n as usize > JOB_MAX_TARGETS)
+    {
+        return Err(bad(format!("max_parallel must be 1-{JOB_MAX_TARGETS}")));
+    }
     let devices: BTreeSet<Uuid> = req.devices.iter().copied().collect();
     if devices.is_empty() || devices.len() > JOB_MAX_TARGETS {
         return Err(bad(format!(
@@ -158,7 +181,6 @@ pub(crate) async fn create_job(
 
     let id = Uuid::new_v4();
     let sha = hex::encode(Sha256::digest(req.script.as_bytes()));
-    let now = now_millis();
     let mut tx = s.db.begin().await?;
     let mut unknown = 0;
     for d in &devices {
@@ -176,8 +198,9 @@ pub(crate) async fn create_job(
         )));
     }
     sqlx::query(
-        "INSERT INTO jobs (id, name, created_by, created_at, shell, script, script_sha256, timeout_secs)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO jobs (id, name, created_by, created_at, shell, script, script_sha256,
+             timeout_secs, run_at, max_parallel)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(name)
@@ -187,6 +210,8 @@ pub(crate) async fn create_job(
     .bind(&req.script)
     .bind(&sha)
     .bind(i64::from(timeout))
+    .bind(run_at)
+    .bind(req.max_parallel.map(i64::from))
     .execute(&mut *tx)
     .await?;
     for d in &devices {
@@ -205,9 +230,10 @@ pub(crate) async fn create_job(
         &id.to_string(),
         true,
         &format!(
-            "name={name:?} targets={} shell={} timeout={timeout}s sha256={sha}",
+            "name={name:?} targets={} shell={} timeout={timeout}s run_at={run_at:?} max_parallel={:?} sha256={sha}",
             devices.len(),
-            enum_str(&req.shell)
+            enum_str(&req.shell),
+            req.max_parallel
         ),
         client.map(|c| c.0.0.ip()),
     )
@@ -279,7 +305,8 @@ pub(crate) async fn get_job(
     }))
 }
 
-/// Stops handing the job out. Devices already running it finish (stopping them is T-802).
+/// Stops handing the job out; devices running it learn of the cancel at their next check-in
+/// (within seconds) and stop the script. Agents older than protocol 1.17 let it finish.
 pub(crate) async fn cancel_job(
     State(s): State<AppState>,
     tech: TechAuth,
@@ -326,30 +353,29 @@ pub(crate) async fn claim_job(
     State(s): State<AppState>,
     dev: DeviceAuth,
 ) -> Result<Response, AppError> {
-    let mut tx = s.db.begin().await?;
-    let row = sqlx::query(
-        "SELECT j.id, j.created_by, j.shell, j.script, j.timeout_secs
-         FROM job_targets t JOIN jobs j ON j.id = t.job_id
-         WHERE t.device_id = ? AND t.state = 'pending' AND j.cancelled_at IS NULL
-         ORDER BY j.created_at LIMIT 1",
-    )
-    .bind(&dev.id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some(row) = row else {
-        return Ok(StatusCode::NO_CONTENT.into_response());
-    };
-    let job_id: String = row.get("id");
-    sqlx::query(
-        "UPDATE job_targets SET state = 'running', claimed_at = ?
-         WHERE job_id = ? AND device_id = ? AND state = 'pending'",
+    // One statement, so concurrent claims from many devices cannot overshoot max_parallel.
+    let job_id: Option<String> = sqlx::query_scalar(
+        "UPDATE job_targets SET state = 'running', claimed_at = ?1
+         WHERE device_id = ?2 AND state = 'pending' AND job_id = (
+             SELECT j.id FROM job_targets t JOIN jobs j ON j.id = t.job_id
+             WHERE t.device_id = ?2 AND t.state = 'pending' AND j.cancelled_at IS NULL
+                 AND (j.run_at IS NULL OR j.run_at <= ?1)
+                 AND (j.max_parallel IS NULL OR (SELECT COUNT(*) FROM job_targets r
+                     WHERE r.job_id = j.id AND r.state = 'running') < j.max_parallel)
+             ORDER BY j.created_at LIMIT 1)
+         RETURNING job_id",
     )
     .bind(now_millis())
-    .bind(&job_id)
     .bind(&dev.id)
-    .execute(&mut *tx)
+    .fetch_optional(&s.db)
     .await?;
-    tx.commit().await?;
+    let Some(job_id) = job_id else {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    };
+    let row = sqlx::query("SELECT created_by, shell, script, timeout_secs FROM jobs WHERE id = ?")
+        .bind(&job_id)
+        .fetch_one(&s.db)
+        .await?;
     tracing::info!(job = %job_id, device = %dev.id, "job claimed");
     Ok(Json(AgentJob {
         id: parse_uuid(&job_id)?,
@@ -359,6 +385,30 @@ pub(crate) async fn claim_job(
         timeout_secs: row.get::<i64, _>("timeout_secs") as u32,
     })
     .into_response())
+}
+
+/// Running-job check-in: records that the device is alive and tells it whether to stop.
+pub(crate) async fn job_progress(
+    State(s): State<AppState>,
+    dev: DeviceAuth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<JobControl>, AppError> {
+    let cancel: Option<bool> = sqlx::query_scalar(
+        "UPDATE job_targets SET progress_at = ? WHERE job_id = ? AND device_id = ? AND state = 'running'
+         RETURNING (SELECT cancelled_at IS NOT NULL FROM jobs WHERE jobs.id = job_targets.job_id)",
+    )
+    .bind(now_millis())
+    .bind(id.to_string())
+    .bind(&dev.id)
+    .fetch_optional(&s.db)
+    .await?;
+    let cancel = cancel.ok_or_else(|| {
+        AppError::new(err(
+            StatusCode::CONFLICT,
+            "this device has no running target in that job",
+        ))
+    })?;
+    Ok(Json(JobControl { cancel }))
 }
 
 pub(crate) async fn job_result(

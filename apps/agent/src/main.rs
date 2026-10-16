@@ -242,6 +242,17 @@ impl Client {
         Ok(Some(res.json().await?))
     }
 
+    /// Running-job check-in; the reply says whether the job was cancelled.
+    async fn job_progress(&self, secret: &str, id: uuid::Uuid) -> anyhow::Result<JobControl> {
+        let res = self
+            .http
+            .post(format!("{}/api/v1/agent/jobs/{id}/progress", self.base))
+            .bearer_auth(secret)
+            .send()
+            .await?;
+        Ok(check(res).await?.json().await?)
+    }
+
     async fn job_result(&self, secret: &str, id: uuid::Uuid, r: &JobResult) -> anyhow::Result<()> {
         let res = self
             .http

@@ -26,6 +26,10 @@ pub struct JobsState {
     shell: Shell,
     script: text_editor::Content,
     timeout: String,
+    /// Minutes until devices may start it; empty = now.
+    delay: String,
+    /// Most devices running it at once; empty = no limit.
+    parallel: String,
     confirm: bool,
     busy: bool,
     notice: Option<Result<String, String>>,
@@ -43,6 +47,8 @@ impl JobsState {
             shell: Shell::Powershell,
             script: text_editor::Content::new(),
             timeout: "300".into(),
+            delay: String::new(),
+            parallel: String::new(),
             confirm: false,
             busy: false,
             notice: None,
@@ -72,6 +78,10 @@ pub enum JobMsg {
     Shell(ShellChoice),
     Edit(text_editor::Action),
     Timeout(String),
+    Delay(String),
+    Parallel(String),
+    /// Prefill the form with the open job, targeting the devices where it failed.
+    Rerun,
     Ask,
     Confirm,
     CancelConfirm,
@@ -123,6 +133,47 @@ impl Console {
             JobMsg::Shell(s) => j.shell = s.0,
             JobMsg::Edit(a) => j.script.perform(a),
             JobMsg::Timeout(s) => j.timeout = s,
+            JobMsg::Delay(s) => j.delay = s,
+            JobMsg::Parallel(s) => j.parallel = s,
+            JobMsg::Rerun => {
+                let Some((_, Some(Ok(d)))) = &j.open else {
+                    return Task::none();
+                };
+                // Refused devices would refuse again; only retry real failures.
+                let failed: BTreeMap<Uuid, String> = d
+                    .targets
+                    .iter()
+                    .filter(|t| {
+                        matches!(
+                            (t.state, t.exit_code),
+                            (JobTargetState::Exited, Some(c)) if c != 0
+                        ) || t.state == JobTargetState::TimedOut
+                            || (t.state == JobTargetState::Failed
+                                && target_status(t).0 != "refused")
+                    })
+                    .map(|t| (t.device_id, t.hostname.clone()))
+                    .collect();
+                if failed.is_empty() {
+                    j.notice = Some(Err(
+                        "No failed devices to rerun (refused ones are skipped).".into(),
+                    ));
+                    return Task::none();
+                }
+                let s = &d.summary;
+                j.name = format!("{} (rerun)", s.name).chars().take(120).collect();
+                j.shell = s.shell;
+                j.script = text_editor::Content::with_text(&d.script);
+                j.timeout = s.timeout_secs.to_string();
+                j.parallel = s.max_parallel.map(|n| n.to_string()).unwrap_or_default();
+                j.delay.clear();
+                j.notice = Some(Ok(format!(
+                    "Rerun prepared for {} failed device(s). Check the script, then queue it.",
+                    failed.len()
+                )));
+                j.selected = failed;
+                j.form = true;
+                j.confirm = false;
+            }
             JobMsg::Ask => {
                 j.notice = None;
                 match self.job_request() {
@@ -194,7 +245,7 @@ impl Console {
             JobMsg::Cancelled(r) => {
                 j.notice = Some(r.map(|s| {
                     format!(
-                        "Cancelled \"{}\": devices that had not picked it up will not run it; {} still running finish.",
+                        "Cancelled \"{}\": devices that had not started will not run it; {} running are told to stop within seconds.",
                         s.name, s.running
                     )
                 }));
@@ -228,12 +279,32 @@ impl Console {
             .ok()
             .filter(|t| (1..=3600).contains(t))
             .ok_or("Timeout must be 1 to 3600 seconds.")?;
+        let delay = match j.delay.trim() {
+            "" => None,
+            d => Some(
+                d.parse::<i64>()
+                    .ok()
+                    .filter(|m| (0..=90 * 24 * 60).contains(m))
+                    .ok_or("Start in must be 0 to 129600 minutes (90 days), or empty for now.")?,
+            ),
+        };
+        let max_parallel = match j.parallel.trim() {
+            "" => None,
+            n => Some(
+                n.parse::<u32>()
+                    .ok()
+                    .filter(|n| (1..=JOB_MAX_TARGETS as u32).contains(n))
+                    .ok_or("At most at once must be 1 to 1000, or empty for no limit.")?,
+            ),
+        };
         Ok(JobCreate {
             name: j.name.trim().to_owned(),
             shell: j.shell,
             script,
             timeout_secs: Some(timeout),
             devices: j.selected.keys().copied().collect(),
+            run_at: delay.filter(|&m| m > 0).map(|m| now_millis() + m * 60_000),
+            max_parallel,
         })
     }
 
@@ -309,6 +380,8 @@ impl Console {
                 let rows = l.iter().map(|s| {
                     let progress = if s.cancelled && s.running == 0 {
                         "cancelled".to_owned()
+                    } else if let Some(at) = s.run_at.filter(|&t| t > now_millis()) {
+                        format!("starts {}", until(at))
                     } else if finished(s) {
                         "done".to_owned()
                     } else {
@@ -409,6 +482,23 @@ impl Console {
             ]
             .spacing(8)
             .align_y(Alignment::Center),
+            row![
+                text("Start in (min)").size(13),
+                text_input("now", &j.delay)
+                    .on_input(|s| Message::Job(JobMsg::Delay(s)))
+                    .padding(6)
+                    .width(80),
+                text("At most at once").size(13),
+                text_input("all", &j.parallel)
+                    .on_input(|s| Message::Job(JobMsg::Parallel(s)))
+                    .padding(6)
+                    .width(80),
+                text("Offline devices run it when they next check in.")
+                    .size(12)
+                    .style(text::secondary),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
             text_editor(&j.script)
                 .placeholder("Restart-Service Spooler")
                 .on_action(|a| Message::Job(JobMsg::Edit(a)))
@@ -427,8 +517,16 @@ impl Console {
                 container(
                     column![
                         text(format!(
-                            "Queue this {} script for {n} device(s)? Each device that allows it runs it with its agent's privileges as soon as it next checks in.",
-                            ShellChoice(j.shell)
+                            "Queue this {} script for {n} device(s)? Each device that allows it runs it with its agent's privileges {}{}.",
+                            ShellChoice(j.shell),
+                            match j.delay.trim() {
+                                "" | "0" => "as soon as it next checks in".to_owned(),
+                                m => format!("starting in {m} minute(s)"),
+                            },
+                            match j.parallel.trim() {
+                                "" => String::new(),
+                                p => format!(", at most {p} at a time"),
+                            }
                         )),
                         row![
                             button(text(format!("Queue for {n} devices")))
@@ -458,10 +556,15 @@ impl Console {
             row![
                 text(&s.name).size(18),
                 Space::new().width(Length::Fill),
-                button(text("Cancel waiting").size(13))
+                button(text("Rerun failed").size(13))
+                    .style(button::secondary)
+                    .on_press_maybe(
+                        (finished(s) && s.failed > 0).then_some(Message::Job(JobMsg::Rerun))
+                    ),
+                button(text("Cancel job").size(13))
                     .style(button::danger)
                     .on_press_maybe(
-                        (s.pending > 0 && !s.cancelled)
+                        (!finished(s) && !s.cancelled)
                             .then_some(Message::Job(JobMsg::Cancel(s.id)))
                     ),
                 button(text("Export CSV").size(13))
@@ -471,11 +574,18 @@ impl Console {
             .spacing(8)
             .align_y(Alignment::Center),
             text(format!(
-                "by {} · {} · {} · timeout {} s · script sha256 {}…",
+                "by {} · {} · {} · timeout {} s{}{} · script sha256 {}…",
                 s.created_by,
                 ago(s.created_at),
                 ShellChoice(s.shell),
                 s.timeout_secs,
+                match s.run_at {
+                    Some(at) if at > now_millis() => format!(" · starts {}", until(at)),
+                    _ => String::new(),
+                },
+                s.max_parallel
+                    .map(|n| format!(" · at most {n} at once"))
+                    .unwrap_or_default(),
                 &s.script_sha256[..12.min(s.script_sha256.len())]
             ))
             .size(12)
@@ -571,6 +681,17 @@ impl Console {
         ]
         .spacing(8)
         .into()
+    }
+}
+
+/// "in 5m", "in 3h", ... for a future time.
+fn until(at: Millis) -> String {
+    let s = ((at - now_millis()) / 1000).max(0);
+    match s {
+        0..60 => format!("in {s}s"),
+        60..3600 => format!("in {}m", (s + 59) / 60),
+        3600..86400 => format!("in {}h", s / 3600),
+        _ => format!("in {}d", s / 86400),
     }
 }
 

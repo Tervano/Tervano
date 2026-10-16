@@ -67,7 +67,7 @@ pub async fn run(
             match client.claim_job(&secret).await {
                 Ok(Some(job)) => {
                     let id = job.id;
-                    let result = execute(&jobs, &cfg, job, &mut stop).await;
+                    let result = execute(&client, &secret, &jobs, &cfg, job, &mut stop).await;
                     unsent = Some((id, result));
                     if *stop.borrow() {
                         if let Some((id, r)) = &unsent {
@@ -92,7 +92,20 @@ pub async fn run(
     }
 }
 
+/// While a job runs the agent checks in this often; the reply says whether it was cancelled.
+const CHECK_IN_EVERY: u32 = 10; // x 500 ms
+
+/// Why a running job was stopped early.
+#[derive(Clone, Copy, PartialEq)]
+enum Stopped {
+    No,
+    AgentShutdown,
+    Technician,
+}
+
 async fn execute(
+    client: &Client,
+    secret: &str,
     jobs: &Jobs,
     cfg: &ServerJobsConfig,
     job: AgentJob,
@@ -135,13 +148,32 @@ async fn execute(
         Ok(id) => id,
         Err(e) => return refuse(format!("could not start: {e}")),
     };
-    let mut cancelled = false;
+    let job_id = job.id;
+    let mut stopped = Stopped::No;
+    let mut ticks = 0u32;
     loop {
         let stopping = !sleep_or_stop(Duration::from_millis(500), stop).await;
-        if stopping && !cancelled {
+        if stopping && stopped == Stopped::No {
             // Agent shutting down: kill the script rather than leave it orphaned.
             let _ = jobs.cancel(id);
-            cancelled = true;
+            stopped = Stopped::AgentShutdown;
+        }
+        ticks += 1;
+        if stopped == Stopped::No && ticks.is_multiple_of(CHECK_IN_EVERY) {
+            // Bounded so a slow server never delays noticing that the script finished.
+            match tokio::time::timeout(Duration::from_secs(5), client.job_progress(secret, job_id))
+                .await
+            {
+                Ok(Ok(c)) if c.cancel => {
+                    tracing::info!(job = %job_id, "server job cancelled by a technician");
+                    let _ = jobs.cancel(id);
+                    stopped = Stopped::Technician;
+                }
+                Ok(Ok(_)) => {}
+                // Unreachable server or an older one without check-ins: keep running.
+                Ok(Err(e)) => tracing::debug!(job = %job_id, "job check-in failed: {e:#}"),
+                Err(_) => tracing::debug!(job = %job_id, "job check-in timed out"),
+            }
         }
         let Some(st) = jobs.status(id) else {
             return refuse("the command record was lost".into());
@@ -153,10 +185,12 @@ async fn execute(
                 stdout: st.stdout,
                 stderr: st.stderr,
                 truncated: st.truncated,
-                error: if cancelled {
-                    Some("the agent stopped while the job was running".into())
-                } else {
-                    st.error
+                error: match stopped {
+                    Stopped::AgentShutdown => {
+                        Some("the agent stopped while the job was running".into())
+                    }
+                    Stopped::Technician => Some("stopped: the job was cancelled".into()),
+                    Stopped::No => st.error,
                 },
                 started_at: st.started_at,
                 finished_at: st.finished_at.unwrap_or_else(now_millis),
