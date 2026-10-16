@@ -7,7 +7,7 @@ particular binary may use only a subset. Tervano's own crates are excluded.
 License expressions are package metadata, not a legal review. Follow each
 package link for its full license text and any additional notices.
 
-Resolved third-party packages: 599.
+Resolved third-party packages: 603.
 
 | Package | Declared license |
 |---|---|
@@ -76,6 +76,7 @@ Resolved third-party packages: 599.
 | [cfg-if 1.0.5](https://crates.io/crates/cfg-if/1.0.5) | MIT OR Apache-2.0 |
 | [cfg_aliases 0.2.2](https://crates.io/crates/cfg_aliases/0.2.2) | MIT |
 | [chacha20 0.10.2](https://crates.io/crates/chacha20/0.10.2) | MIT OR Apache-2.0 |
+| [chrono 0.4.45](https://crates.io/crates/chrono/0.4.45) | MIT OR Apache-2.0 |
 | [clap 4.6.7](https://crates.io/crates/clap/4.6.7) | MIT OR Apache-2.0 |
 | [clap_builder 4.6.7](https://crates.io/crates/clap_builder/4.6.7) | MIT OR Apache-2.0 |
 | [clap_derive 4.6.7](https://crates.io/crates/clap_derive/4.6.7) | MIT OR Apache-2.0 |
@@ -197,6 +198,8 @@ Resolved third-party packages: 599.
 | [hyper 1.12.0](https://crates.io/crates/hyper/1.12.0) | MIT |
 | [hyper-rustls 0.27.10](https://crates.io/crates/hyper-rustls/0.27.10) | Apache-2.0 OR ISC OR MIT |
 | [hyper-util 0.1.21](https://crates.io/crates/hyper-util/0.1.21) | MIT |
+| [iana-time-zone 0.1.65](https://crates.io/crates/iana-time-zone/0.1.65) | MIT OR Apache-2.0 |
+| [iana-time-zone-haiku 0.1.2](https://crates.io/crates/iana-time-zone-haiku/0.1.2) | MIT OR Apache-2.0 |
 | [iced 0.14.0](https://crates.io/crates/iced/0.14.0) | MIT |
 | [iced_core 0.14.0](https://crates.io/crates/iced_core/0.14.0) | MIT |
 | [iced_debug 0.14.0](https://crates.io/crates/iced_debug/0.14.0) | MIT |
@@ -580,6 +583,7 @@ Resolved third-party packages: 599.
 | [winnow 0.7.15](https://crates.io/crates/winnow/0.7.15) | MIT |
 | [winnow 1.0.4](https://crates.io/crates/winnow/1.0.4) | MIT |
 | [wit-bindgen 0.57.1](https://crates.io/crates/wit-bindgen/0.57.1) | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
+| [wmi 0.18.4](https://crates.io/crates/wmi/0.18.4) | MIT OR Apache-2.0 |
 | [writeable 0.6.4](https://crates.io/crates/writeable/0.6.4) | Unicode-3.0 |
 | [x11-dl 2.21.0](https://crates.io/crates/x11-dl/2.21.0) | MIT |
 | [x11rb 0.13.2](https://crates.io/crates/x11rb/0.13.2) | MIT OR Apache-2.0 |

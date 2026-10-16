@@ -1,0 +1,21 @@
+[licenses]
+# Keep this list narrow. cargo-deny evaluates OR expressions against allowed
+# alternatives, so GPL/LGPL options in dual-licensed crates are not selected.
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# cargo-deny allows crates.io by default. Other sources require a review.

@@ -2,6 +2,9 @@ mod cert;
 
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, time::Duration};
+use tervano_server::audit_archive::{
+    archive_audit, export_audit, spawn_audit_archiver, verify_archives,
+};
 use tervano_server::{
     AppState, Config, DEFAULT_TECH_TOKEN_HOURS, MAX_TECH_TOKEN_HOURS, app, audit, connect,
     create_enrollment_token, create_technician_with_ttl, revoke_technician, rotate_technician,
@@ -31,6 +34,11 @@ enum Cmd {
     Tech {
         #[command(subcommand)]
         cmd: TechCmd,
+    },
+    /// Export or archive the append-only audit trail.
+    Audit {
+        #[command(subcommand)]
+        cmd: AuditCmd,
     },
     /// TLS certificates.
     Cert {
@@ -71,6 +79,27 @@ enum TechCmd {
     Revoke {
         #[arg(long)]
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuditCmd {
+    /// Export a complete read snapshot to a new NDJSON file.
+    Export {
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Archive rows older than the retention window, then remove those rows.
+    Archive {
+        #[arg(long)]
+        dir: PathBuf,
+        #[arg(long)]
+        retain_days: u32,
+    },
+    /// Verify archive hashes and row ranges after backup or transfer.
+    Verify {
+        #[arg(long)]
+        dir: PathBuf,
     },
 }
 
@@ -143,6 +172,11 @@ async fn main() -> anyhow::Result<()> {
     match cli.cmd {
         Cmd::Serve => {
             let addr: std::net::SocketAddr = cfg.listen.parse()?;
+            if let (Some(days), Some(dir)) = (cfg.audit_retention_days, &cfg.audit_archive_dir) {
+                let archived = archive_audit(&db, dir, days, "server").await?;
+                tracing::info!(archived, days, "audit retention checked at startup");
+                spawn_audit_archiver(db.clone(), dir.clone(), days);
+            }
             let state = AppState::with_rate_limits(
                 db,
                 cfg.offline_after_secs as i64 * 1000,
@@ -224,6 +258,24 @@ async fn main() -> anyhow::Result<()> {
         } => {
             revoke_technician(&db, &name, &cli_actor()).await?;
             println!("revoked {name}");
+        }
+        Cmd::Audit {
+            cmd: AuditCmd::Export { out },
+        } => {
+            let (rows, sha256) = export_audit(&db, &out).await?;
+            println!("exported {rows} audit rows; sha256={sha256}");
+        }
+        Cmd::Audit {
+            cmd: AuditCmd::Archive { dir, retain_days },
+        } => {
+            let rows = archive_audit(&db, &dir, retain_days, &cli_actor()).await?;
+            println!("archived {rows} audit rows");
+        }
+        Cmd::Audit {
+            cmd: AuditCmd::Verify { dir },
+        } => {
+            let (files, rows) = verify_archives(&dir)?;
+            println!("verified {files} audit files and {rows} rows");
         }
         Cmd::Cert { .. } => unreachable!("handled above"),
     }

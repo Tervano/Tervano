@@ -1,5 +1,7 @@
 //! Tervano Server library: HTTP API + persistence. `main.rs` is the CLI around it.
 
+pub mod audit_archive;
+
 use axum::{
     Extension, Json, Router,
     extract::{ConnectInfo, FromRequestParts, Path, Query, Request, State},
@@ -33,6 +35,8 @@ pub struct Config {
     pub event_retention_days: u32,
     pub requests_per_second: u32,
     pub enrollments_per_minute: u32,
+    pub audit_retention_days: Option<u32>,
+    pub audit_archive_dir: Option<std::path::PathBuf>,
     /// PEM certificate chain and private key. Required unless `listen` is loopback.
     pub tls_cert: Option<std::path::PathBuf>,
     pub tls_key: Option<std::path::PathBuf>,
@@ -47,6 +51,8 @@ impl Default for Config {
             event_retention_days: 30,
             requests_per_second: 100,
             enrollments_per_minute: 60,
+            audit_retention_days: None,
+            audit_archive_dir: None,
             tls_cert: None,
             tls_key: None,
         }
@@ -83,6 +89,15 @@ impl Config {
             (1..=100_000).contains(&self.enrollments_per_minute),
             "enrollments_per_minute must be 1-100000"
         );
+        anyhow::ensure!(
+            self.audit_retention_days.is_some() == self.audit_archive_dir.is_some(),
+            "set both audit_retention_days and audit_archive_dir, or neither"
+        );
+        if let (Some(days), Some(dir)) = (self.audit_retention_days, &self.audit_archive_dir) {
+            anyhow::ensure!(days >= 1, "audit_retention_days must be >= 1");
+            anyhow::ensure!(dir.is_absolute(), "audit_archive_dir must be absolute");
+            anyhow::ensure!(dir.is_dir(), "audit_archive_dir must already exist");
+        }
         Ok(())
     }
 }

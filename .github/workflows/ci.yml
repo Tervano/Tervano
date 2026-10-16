@@ -18,6 +18,33 @@ env:
 
 # Testing is deferred (PLAN.md, 2026-10-14), so there is no test job yet; add `cargo test` here when it returns.
 jobs:
+  dependencies:
+    name: Dependency licenses and advisories
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses sources
+          arguments: --all-features
+      # cargo-audit scans every lockfile entry, including SQLx's disabled MySQL
+      # backend. Fail if its rsa dependency ever enters a build graph.
+      - name: Keep the RSA advisory exception unreachable
+        run: |
+          if cargo tree --workspace --all-features --target all -e all -i rsa 2>/dev/null | grep -q '^rsa v'; then
+            echo 'rsa is now reachable; remove the audit exception and resolve RUSTSEC-2023-0071'
+            exit 1
+          fi
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ignore: RUSTSEC-2023-0071
+      - run: python3 scripts/generate-third-party-licenses.py
+      - run: git diff --exit-code -- THIRD_PARTY_LICENSES.md
+
   windows:
     name: Windows (fmt, clippy, build all)
     runs-on: windows-latest
