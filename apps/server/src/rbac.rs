@@ -2,7 +2,7 @@
 //!
 //! Roles are ordered: viewer (read devices, inventory, events, jobs) < operator (+ queue and cancel
 //! jobs, edit groups) < admin (+ audit log, metrics, groups used as scopes). A scope limits a
-//! technician to the devices in one or more static groups; scoped technicians also only see their
+//! technician to the devices in one or more groups (static, or search groups refreshed every minute); scoped technicians also only see their
 //! own jobs and cannot edit groups. Out-of-scope devices answer 404, like unknown ones, so a scope
 //! does not reveal which devices exist.
 
@@ -179,7 +179,7 @@ pub(crate) async fn me(
     }))
 }
 
-/// CLI: set a technician's role and/or replace their scope (static group names; empty = all devices).
+/// CLI: set a technician's role and/or replace their scope (group names; empty = all devices).
 pub async fn set_technician_access(
     db: &SqlitePool,
     name: &str,
@@ -201,6 +201,7 @@ pub async fn set_technician_access(
             .execute(&mut *tx)
             .await?;
     }
+    let mut query_groups = Vec::new();
     if let Some(groups) = scope {
         sqlx::query("DELETE FROM technician_scopes WHERE technician = ?")
             .bind(name)
@@ -215,11 +216,9 @@ pub async fn set_technician_access(
             let Some((id, kind)) = row else {
                 anyhow::bail!("no device group named {g:?}");
             };
-            // shortcut: scopes take static groups only; query-group scopes need per-device search evaluation, T-812.
-            anyhow::ensure!(
-                kind == "static",
-                "{g:?} is a search group; scopes must be static groups"
-            );
+            if kind == "query" {
+                query_groups.push(id.clone());
+            }
             sqlx::query(
                 "INSERT OR IGNORE INTO technician_scopes (technician, group_id) VALUES (?, ?)",
             )
@@ -230,6 +229,11 @@ pub async fn set_technician_access(
         }
     }
     tx.commit().await?;
+    // After the commit: the refresh writes through another connection. Makes a search-group scope
+    // effective now rather than at the next minute's refresh.
+    for id in &query_groups {
+        crate::groups::refresh_query_groups(db, Some(id)).await?;
+    }
     audit(
         db,
         actor,

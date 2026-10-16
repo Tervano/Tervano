@@ -9,7 +9,7 @@ use tervano_server::audit_archive::{
 use tervano_server::{
     AppState, Config, DEFAULT_TECH_TOKEN_HOURS, MAX_TECH_TOKEN_HOURS, app, audit, connect,
     create_enrollment_token, create_technician_with_ttl, revoke_technician, rotate_technician,
-    set_technician_access, spawn_event_purger, spawn_offline_sweeper,
+    set_technician_access, spawn_event_purger, spawn_offline_sweeper, spawn_query_group_refresher,
 };
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -95,7 +95,7 @@ enum TechCmd {
         hours: u64,
         #[arg(long, value_enum, default_value = "admin")]
         role: RoleArg,
-        /// Limit to the devices of this static group (repeatable). Omit for every device.
+        /// Limit to the devices of this group (repeatable; search groups refresh every minute). Omit for every device.
         #[arg(long)]
         scope: Vec<String>,
     },
@@ -105,7 +105,7 @@ enum TechCmd {
         name: String,
         #[arg(long, value_enum)]
         role: Option<RoleArg>,
-        /// Replace the scope with these static groups (repeatable).
+        /// Replace the scope with these groups (repeatable).
         #[arg(long, conflicts_with = "all_devices")]
         scope: Vec<String>,
         /// Remove the scope: the technician sees every device.
@@ -239,6 +239,7 @@ async fn main() -> anyhow::Result<()> {
                 cfg.enrollments_per_minute,
             );
             spawn_offline_sweeper(state.clone());
+            spawn_query_group_refresher(state.db.clone());
             spawn_event_purger(state.db.clone(), cfg.event_retention_days);
             let router = app(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
             let handle = axum_server::Handle::new();

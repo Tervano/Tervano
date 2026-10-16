@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.21";
+pub const PROTOCOL_VERSION: &str = "1.22";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -811,7 +811,7 @@ pub enum TechRole {
 pub struct TechnicianInfo {
     pub name: String,
     pub role: TechRole,
-    /// Static groups this technician is limited to; empty = every device.
+    /// Groups this technician is limited to; empty = every device.
     pub scope: Vec<String>,
     /// When the API token expires.
     pub expires_at: Millis,
@@ -836,7 +836,7 @@ pub struct DeviceGroup {
     pub query: Option<String>,
     pub created_by: String,
     pub created_at: Millis,
-    /// Member count of a static group; `None` for a query group.
+    /// Member count. For a query group, as of its last refresh (at most a minute old).
     pub members: Option<u32>,
 }
 

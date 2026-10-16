@@ -39,7 +39,7 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Server | TLS | Implemented | Win/Linux | rustls; plaintext only on loopback. `tervano-server cert init` creates a private CA + server cert |
 | Server | Audit log | Partial | Win/Linux | Append-only (DB triggers); enrollments, auth failures, token/technician creation and lifecycle. `GET /api/v1/audit` includes socket peer IP for HTTP events; behind a proxy this is the proxy IP |
 | Server | Technician API tokens | Partial | Win/Linux | New tokens expire after 30 days by default; `tech rotate` replaces the old token and `tech revoke` disables it. CLI management only; direct-channel certificate lifecycle remains separate work |
-| Server | Roles and device scopes | Implemented | Win/Linux | Viewer, operator and admin roles; a technician can be limited to the devices of chosen static groups (`tech create --role --scope`, `tech set`). Denials are audited |
+| Server | Roles and device scopes | Implemented | Win/Linux | Viewer, operator and admin roles; a technician can be limited to the devices of chosen groups (static or saved search) (`tech create --role --scope`, `tech set`). Denials are audited |
 | Agent | Report hostname, OS, IPs, signed-in users | Implemented | Windows | Verified on Windows 11 Home 25H2 (build 26200), workgroup machine. Not yet tested domain-joined |
 | Agent | Change detection | Partial | Windows | Poll-and-diff every `poll_secs`; event-driven notifications are T-209/T-210 |
 | Server | Device index + search | Implemented | Win/Linux | Substring (3+ characters, trigram index) or prefix search by hostname, username, `DOMAIN\user`, IP; P95 at most 87 ms with 10,000 devices in a local test (T-112). Tests: [api.rs](apps/server/tests/api.rs) |

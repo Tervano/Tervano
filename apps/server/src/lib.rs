@@ -267,6 +267,20 @@ pub fn spawn_offline_sweeper(state: AppState) {
 }
 
 /// Removes old device event snapshots at startup and hourly, without monopolizing SQLite writes.
+/// Keeps query-group membership current (T-812): a device that starts or stops matching a saved
+/// search joins or leaves the group, and with it any technician scope built on it, within a minute.
+pub fn spawn_query_group_refresher(db: SqlitePool) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            if let Err(e) = groups::refresh_query_groups(&db, None).await {
+                tracing::warn!("query group refresh failed: {e}");
+            }
+        }
+    });
+}
+
 pub fn spawn_event_purger(db: SqlitePool, retention_days: u32) {
     let retention_ms = i64::from(retention_days) * 86_400_000;
     tokio::spawn(async move {
@@ -1049,6 +1063,42 @@ fn like_prefix(q: &str) -> String {
 }
 
 /// Prefix search over hostname, logged-in username (also `DOMAIN\user`) and IP. Empty query lists all.
+/// The device-matching condition of a search (on `devices d`, parameter `?1`) and the value to
+/// bind. Shared by device search and query-group membership so the two always agree.
+fn search_condition(q: &str) -> (&'static str, String) {
+    // `DOMAIN\user` → search on the user part.
+    let q = q.rsplit_once('\\').map_or(q, |(_, user)| user);
+    if q.chars().count() >= 3 {
+        // Substring match via the trigram index. The input becomes one quoted FTS phrase, so FTS
+        // query syntax typed by a technician is never interpreted.
+        (
+            "d.id IN (SELECT device_id FROM device_search WHERE device_search MATCH ?1)",
+            format!("\"{}\"", q.replace('"', "\"\"")),
+        )
+    } else {
+        (
+            r"(d.hostname LIKE ?1 ESCAPE '\'
+              OR EXISTS (SELECT 1 FROM device_sessions s WHERE s.device_id = d.id AND s.username LIKE ?1 ESCAPE '\')
+              OR EXISTS (SELECT 1 FROM device_addresses a WHERE a.device_id = d.id AND a.address LIKE ?1 ESCAPE '\'))",
+            like_prefix(q),
+        )
+    }
+}
+
+/// Ids of the non-revoked devices a search matches, for query-group membership.
+pub(crate) async fn matching_device_ids(
+    db: &SqlitePool,
+    q: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    let (condition, value) = search_condition(q);
+    sqlx::query_scalar(&format!(
+        "SELECT d.id FROM devices d WHERE d.revoked = 0 AND {condition}"
+    ))
+    .bind(value)
+    .fetch_all(db)
+    .await
+}
+
 async fn search_devices(
     State(s): State<AppState>,
     tech: TechAuth,
@@ -1069,48 +1119,22 @@ async fn search_devices(
         }
     }
     let q = q.as_str();
-    // `DOMAIN\user` → search on the user part.
-    let q = q.rsplit_once('\\').map_or(q, |(_, user)| user);
     let limit = p.limit.clamp(1, 1000) as i64;
-    let rows = if q.chars().count() >= 3 {
-        // Substring match via the trigram index. The input becomes one quoted FTS phrase, so FTS
-        // query syntax typed by a technician is never interpreted.
-        let phrase = format!("\"{}\"", q.replace('"', "\"\""));
-        sqlx::query(
-            "SELECT id, hostname, os, last_seen, state_json FROM devices d
-             WHERE revoked = 0
-               AND id IN (SELECT device_id FROM device_search WHERE device_search MATCH ?1)
-               AND (?3 IS NULL OR id IN (SELECT device_id FROM group_members WHERE group_id = ?3))
-               AND (?4 IS NULL OR id IN (SELECT m.device_id FROM group_members m
-                   JOIN technician_scopes ts ON ts.group_id = m.group_id WHERE ts.technician = ?4))
-             ORDER BY hostname COLLATE NOCASE LIMIT ?2",
-        )
-        .bind(phrase)
-        .bind(limit)
-        .bind(&member_of)
-        .bind(tech.scope_name())
-        .fetch_all(&s.db)
-        .await?
-    } else {
-        let pattern = like_prefix(q);
-        sqlx::query(
-            "SELECT id, hostname, os, last_seen, state_json FROM devices d
-             WHERE revoked = 0 AND (
-                hostname LIKE ?1 ESCAPE '\\'
-                OR EXISTS (SELECT 1 FROM device_sessions s WHERE s.device_id = d.id AND s.username LIKE ?1 ESCAPE '\\')
-                OR EXISTS (SELECT 1 FROM device_addresses a WHERE a.device_id = d.id AND a.address LIKE ?1 ESCAPE '\\'))
-               AND (?3 IS NULL OR id IN (SELECT device_id FROM group_members WHERE group_id = ?3))
-               AND (?4 IS NULL OR id IN (SELECT m.device_id FROM group_members m
-                   JOIN technician_scopes ts ON ts.group_id = m.group_id WHERE ts.technician = ?4))
-             ORDER BY hostname COLLATE NOCASE LIMIT ?2",
-        )
-        .bind(&pattern)
-        .bind(limit)
-        .bind(&member_of)
-        .bind(tech.scope_name())
-        .fetch_all(&s.db)
-        .await?
-    };
+    let (condition, value) = search_condition(q);
+    let rows = sqlx::query(&format!(
+        "SELECT id, hostname, os, last_seen, state_json FROM devices d
+         WHERE revoked = 0 AND {condition}
+           AND (?3 IS NULL OR id IN (SELECT device_id FROM group_members WHERE group_id = ?3))
+           AND (?4 IS NULL OR id IN (SELECT m.device_id FROM group_members m
+               JOIN technician_scopes ts ON ts.group_id = m.group_id WHERE ts.technician = ?4))
+         ORDER BY hostname COLLATE NOCASE LIMIT ?2"
+    ))
+    .bind(value)
+    .bind(limit)
+    .bind(&member_of)
+    .bind(tech.scope_name())
+    .fetch_all(&s.db)
+    .await?;
     let cutoff = now_millis() - s.offline_after_ms;
     let out = rows
         .into_iter()

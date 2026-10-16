@@ -1,5 +1,7 @@
 //! Device groups (T-801): named targets for searches and jobs. Static groups hold explicit
 //! members; query groups store a device search that is re-run each time the group is listed.
+//! Query-group members are also materialized into `group_members` (on creation and every minute,
+//! T-812) so technician scopes and other membership checks treat both kinds alike.
 //! Members are read through `GET /api/v1/devices?group=<id>` so every view gets the same summary.
 
 use super::*;
@@ -18,6 +20,57 @@ fn bad(msg: impl Into<String>) -> AppError {
 
 fn not_found() -> AppError {
     AppError::new(err(StatusCode::NOT_FOUND, "group not found"))
+}
+
+/// Re-evaluates the saved search of every query group (or only `only`) into `group_members`,
+/// writing only when the member set changed.
+pub(crate) async fn refresh_query_groups(
+    db: &SqlitePool,
+    only: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let groups: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, query FROM device_groups
+         WHERE kind = 'query' AND query IS NOT NULL AND (?1 IS NULL OR id = ?1)",
+    )
+    .bind(only)
+    .fetch_all(db)
+    .await?;
+    for (id, query) in groups {
+        let wanted: BTreeSet<String> = matching_device_ids(db, &query).await?.into_iter().collect();
+        let current: BTreeSet<String> =
+            sqlx::query_scalar("SELECT device_id FROM group_members WHERE group_id = ?")
+                .bind(&id)
+                .fetch_all(db)
+                .await?
+                .into_iter()
+                .collect();
+        if wanted == current {
+            continue;
+        }
+        let mut tx = db.begin().await?;
+        for gone in current.difference(&wanted) {
+            sqlx::query("DELETE FROM group_members WHERE group_id = ? AND device_id = ?")
+                .bind(&id)
+                .bind(gone)
+                .execute(&mut *tx)
+                .await?;
+        }
+        for new in wanted.difference(&current) {
+            sqlx::query("INSERT OR IGNORE INTO group_members (group_id, device_id) VALUES (?, ?)")
+                .bind(&id)
+                .bind(new)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        tracing::info!(
+            group = %id,
+            added = wanted.difference(&current).count(),
+            removed = current.difference(&wanted).count(),
+            "query group members updated"
+        );
+    }
+    Ok(())
 }
 
 /// Kind and stored query of a group, for the device search.
@@ -72,8 +125,8 @@ async fn load(
                 query: r.get("query"),
                 created_by: r.get("created_by"),
                 created_at: r.get("created_at"),
-                // A query group's size depends on the moment it is evaluated.
-                members: (kind == GroupKind::Static).then(|| r.get::<i64, _>("members") as u32),
+                // Query groups: as of the last refresh, at most a minute old.
+                members: Some(r.get::<i64, _>("members") as u32),
             })
         })
         .collect()
@@ -180,6 +233,9 @@ pub(crate) async fn create_group(
             .await?;
     }
     tx.commit().await?;
+    if req.kind == GroupKind::Query {
+        refresh_query_groups(&s.db, Some(&id.to_string())).await?;
+    }
     audit(
         &s.db,
         &format!("tech:{}", tech.name),
