@@ -155,6 +155,22 @@ fn service_body() -> anyhow::Result<()> {
     if let Err(e) = &result {
         tracing::error!("agent stopped with error: {e:#}");
     }
+    if let Ok(crate::Exit::Updated) = result {
+        // shortcut: the SCM starts the new executable only through its recovery actions (restart on
+        // failure), which `service install` does not configure yet (T-212); without them the
+        // service stays stopped after an update.
+        tracing::info!("stopping with an error so service recovery starts the updated agent");
+        status.set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: ServiceState::Stopped,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::ServiceSpecific(1),
+            checkpoint: 0,
+            wait_hint: Duration::from_secs(5),
+            process_id: None,
+        })?;
+        return Ok(());
+    }
     set(ServiceState::Stopped, ServiceControlAccept::empty())?;
-    result
+    result.map(|_| ())
 }

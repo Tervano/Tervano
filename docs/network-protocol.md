@@ -24,6 +24,7 @@ the minor version; breaking ones bump the major version.
 | `GET /api/v1/audit` | Technician bearer token | Paginated audit records |
 | `GET /api/v1/stream` | Technician bearer token | SSE `device` notifications and `resync` on lag |
 | `POST /api/v1/jobs`, `GET /api/v1/jobs`, `GET /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/cancel` | Technician bearer token | Queue a script for 1–1000 devices, list jobs, per-device results, cancel targets not yet picked up |
+| `GET /api/v1/agent/update?platform=…`, `GET /api/v1/agent/update/{platform}/{version}` | Device bearer secret | Newest signed release for the platform as `{manifest, signature}` (204 if none), and its binary. The agent checks the Ed25519 signature over the exact manifest text against its own configured release key, the platform, that the version is newer, and the binary's size and SHA-256 (T-810) |
 | `POST /api/v1/agent/jobs/claim`, `POST /api/v1/agent/jobs/{id}/progress`, `POST /api/v1/agent/jobs/{id}/result` | Device bearer secret | Next job for this device whose start time has come and whose `max_parallel` has room (204 if none); check-in every 5 s while running (reply says whether it was cancelled; 2 min without one marks it failed); its result (body up to 1 MiB, each output stream cut to 64 KiB) |
 | `GET /metrics` | Technician bearer token | Aggregate Prometheus text; no protocol header |
 

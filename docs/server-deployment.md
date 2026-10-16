@@ -74,6 +74,15 @@ token once; update the Console setting or Prometheus scraper. `tech revoke
 service. Run these commands against the same `server.toml` and database as the
 Server. Rotation and revocation are audited in the same database transaction.
 
+Agent updates (T-810): create the release key once, away from the Server,
+with `tervano-server release keygen --out release.pk8` and put the printed
+public key in each agent's `[update]` section (`enabled = true`,
+`public_key = "…"`, `check_minutes = 60`). For each release run `release sign
+--key release.pk8 --file TervanoAgent.exe --version 0.2.0` where the key lives,
+copy the binary with its `.manifest.json` and `.sig` to the Server and run
+`release publish --file … --manifest … --signature …` against its database.
+Agents pick up the newest release for their platform within `check_minutes`.
+
 `GET /metrics` requires a technician bearer token and exports aggregate
 Prometheus metrics. `GET /healthz` and `GET /readyz` are public. Respect
 `RUST_LOG` for diagnostic logging; do not put tokens in logs or shared command

@@ -6,6 +6,7 @@ pub mod device_certs;
 mod facts;
 mod groups;
 mod rbac;
+pub mod releases;
 mod reports;
 pub mod tickets;
 
@@ -623,6 +624,8 @@ pub fn app(state: AppState) -> Router {
         .route("/jobs/{id}", get(jobs::get_job))
         .route("/jobs/{id}/cancel", post(jobs::cancel_job))
         .route("/agent/jobs/claim", post(jobs::claim_job))
+        .route("/agent/update", get(releases::latest))
+        .route("/agent/update/{platform}/{version}", get(releases::binary))
         .route("/agent/jobs/{id}/progress", post(jobs::job_progress))
         .route(
             "/agent/jobs/{id}/result",

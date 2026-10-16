@@ -76,6 +76,42 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TicketCmd,
     },
+    /// Signed agent releases for self-update (T-810).
+    Release {
+        #[command(subcommand)]
+        cmd: ReleaseCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReleaseCmd {
+    /// Create the release signing key. Keep it off the Server; agents trust its public key.
+    Keygen {
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Sign an agent binary: writes <file>.manifest.json and <file>.sig (run where the key lives).
+    Sign {
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        version: String,
+        #[arg(long, default_value = "windows-x86_64")]
+        platform: String,
+    },
+    /// Store a signed release on this Server, after checking the binary matches its manifest.
+    Publish {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        signature: PathBuf,
+    },
+    /// List published releases.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -254,6 +290,22 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Cert {
             cmd: CertCmd::Tech { name, out },
         } => return cert::tech(out, name),
+        // Release key work needs no Server configuration (it should happen off the Server).
+        Cmd::Release {
+            cmd: ReleaseCmd::Keygen { out },
+        } => {
+            println!("{}", tervano_server::releases::keygen(out)?);
+            return Ok(());
+        }
+        Cmd::Release {
+            cmd:
+                ReleaseCmd::Sign {
+                    key,
+                    file,
+                    version,
+                    platform,
+                },
+        } => return tervano_server::releases::sign(key, file, version, platform),
         _ => {}
     }
     let cfg = load_config(&cli.config)?;
@@ -462,7 +514,31 @@ async fn main() -> anyhow::Result<()> {
             let (files, rows) = verify_archives(&dir)?;
             println!("verified {files} audit files and {rows} rows");
         }
-        Cmd::Cert { .. } | Cmd::Ticket { .. } => unreachable!("handled above"),
+        Cmd::Release {
+            cmd:
+                ReleaseCmd::Publish {
+                    file,
+                    manifest,
+                    signature,
+                },
+        } => {
+            let m =
+                tervano_server::releases::publish(&db, &file, &manifest, &signature, &cli_actor())
+                    .await?;
+            println!("published {} {} ({} bytes)", m.platform, m.version, m.size);
+        }
+        Cmd::Release {
+            cmd: ReleaseCmd::List,
+        } => {
+            for (platform, version, at) in tervano_server::releases::list(&db).await? {
+                println!("{platform}  {version:<12} published_at={at}");
+            }
+        }
+        Cmd::Cert { .. }
+        | Cmd::Ticket { .. }
+        | Cmd::Release {
+            cmd: ReleaseCmd::Keygen { .. } | ReleaseCmd::Sign { .. },
+        } => unreachable!("handled above"),
     }
     Ok(())
 }

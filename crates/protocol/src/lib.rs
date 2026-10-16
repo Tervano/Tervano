@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.25";
+pub const PROTOCOL_VERSION: &str = "1.26";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -812,6 +812,31 @@ pub struct ComplianceResult {
     pub status: ComplianceStatus,
     /// What was found, e.g. the installed version or the free space.
     pub detail: String,
+}
+
+/// One agent release (T-810). Signed with the offline release key as these exact JSON bytes;
+/// agents check the signature with the release public key in their own configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReleaseManifest {
+    /// Dotted numbers, e.g. `0.2.0`.
+    pub version: String,
+    /// See [`agent_platform`].
+    pub platform: String,
+    pub sha256: String,
+    pub size: u64,
+}
+
+/// `GET /api/v1/agent/update?platform=…`: `manifest` is the signed JSON text of a [`ReleaseManifest`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SignedRelease {
+    pub manifest: String,
+    /// Ed25519 signature over `manifest`, hex.
+    pub signature: String,
+}
+
+/// The platform string of releases built for this target, e.g. `windows-x86_64`.
+pub fn agent_platform() -> String {
+    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
 /// Request header carrying a server-issued connection ticket on direct agent requests (T-403).

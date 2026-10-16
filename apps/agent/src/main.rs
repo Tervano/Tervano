@@ -21,6 +21,7 @@ mod services;
 mod software;
 mod terminal;
 mod tickets;
+mod update;
 mod wmiq;
 
 use anyhow::Context;
@@ -56,6 +57,9 @@ pub struct Config {
     /// Scripts queued on the server (T-800). Off unless enabled here.
     #[serde(default)]
     pub server_jobs: serverjobs::ServerJobsConfig,
+    /// Signed self-update (T-810). Off unless enabled here with the release public key.
+    #[serde(default)]
+    pub update: update::UpdateConfig,
 }
 
 fn default_poll() -> u64 {
@@ -96,6 +100,11 @@ impl Config {
         anyhow::ensure!(
             !cfg.server_jobs.enabled || cfg.server_url.is_some(),
             "[server_jobs] needs server_url"
+        );
+        cfg.update.validate()?;
+        anyhow::ensure!(
+            !cfg.update.enabled || cfg.server_url.is_some(),
+            "[update] needs server_url"
         );
         anyhow::ensure!(
             cfg.server_url.is_some() || cfg.direct.is_some(),
@@ -308,6 +317,57 @@ impl Client {
         Ok(Some(res.json().await?))
     }
 
+    /// The newest release the Server has for `platform` (T-810), if any.
+    async fn latest_release(
+        &self,
+        secret: &str,
+        platform: &str,
+    ) -> anyhow::Result<Option<SignedRelease>> {
+        let res = self
+            .http()
+            .get(format!("{}/api/v1/agent/update", self.base))
+            .query(&[("platform", platform)])
+            .bearer_auth(secret)
+            .send()
+            .await?;
+        let res = check(res).await?;
+        if res.status() == reqwest::StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        Ok(Some(res.json().await?))
+    }
+
+    /// A release binary, refused if it is larger than `size` bytes.
+    async fn release_binary(
+        &self,
+        secret: &str,
+        platform: &str,
+        version: &str,
+        size: u64,
+    ) -> anyhow::Result<Vec<u8>> {
+        let mut res = check(
+            self.http()
+                .get(format!(
+                    "{}/api/v1/agent/update/{platform}/{version}",
+                    self.base
+                ))
+                .bearer_auth(secret)
+                .timeout(Duration::from_secs(600))
+                .send()
+                .await?,
+        )
+        .await?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = res.chunk().await? {
+            bytes.extend_from_slice(&chunk);
+            anyhow::ensure!(
+                bytes.len() as u64 <= size,
+                "release binary larger than its manifest"
+            );
+        }
+        Ok(bytes)
+    }
+
     /// Running-job check-in; the reply says whether the job was cancelled.
     async fn job_progress(&self, secret: &str, id: uuid::Uuid) -> anyhow::Result<JobControl> {
         let res = self
@@ -484,10 +544,34 @@ fn jitter(d: Duration, spread: f64) -> Duration {
     d.mul_f64(1.0 - spread + 2.0 * spread * r)
 }
 
-/// Runs the configured roles (server reporting and/or direct management) until `stop` fires.
-/// A failure in either is fatal so misconfiguration is loud rather than half-working.
-pub async fn run(cfg: Config, stop: watch::Receiver<bool>) -> anyhow::Result<()> {
+/// Why [`run`] returned.
+#[derive(Debug, PartialEq)]
+pub enum Exit {
+    Stopped,
+    /// A signed update replaced the executable; start it again (T-810).
+    Updated,
+}
+
+/// Runs the configured roles (server reporting and/or direct management) until `outer` fires or
+/// an update is installed. A failure in either is fatal so misconfiguration is loud rather than
+/// half-working.
+pub async fn run(cfg: Config, mut outer: watch::Receiver<bool>) -> anyhow::Result<Exit> {
     std::fs::create_dir_all(&cfg.state_dir)?;
+    update::cleanup();
+    // Stops on the caller's signal, or when the updater asks for a restart.
+    let (restart, stop) = watch::channel(false);
+    let updated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let restart = restart.clone();
+        tokio::spawn(async move {
+            while !*outer.borrow_and_update() {
+                if outer.changed().await.is_err() {
+                    return;
+                }
+            }
+            let _ = restart.send(true);
+        });
+    }
     let direct = async {
         match &cfg.direct {
             Some(d) => direct::serve(d.clone(), cfg.state_dir.clone(), stop.clone()).await,
@@ -496,12 +580,16 @@ pub async fn run(cfg: Config, stop: watch::Receiver<bool>) -> anyhow::Result<()>
     };
     let reporting = async {
         match &cfg.server_url {
-            Some(url) => report(&cfg, url, stop.clone()).await,
+            Some(url) => report(&cfg, url, stop.clone(), restart.clone(), updated.clone()).await,
             None => Ok(()),
         }
     };
     tokio::try_join!(direct, reporting)?;
-    Ok(())
+    Ok(if updated.load(std::sync::atomic::Ordering::SeqCst) {
+        Exit::Updated
+    } else {
+        Exit::Stopped
+    })
 }
 
 /// Reporting loop: enroll if needed, then report state changes and heartbeats until `stop` fires.
@@ -509,6 +597,8 @@ async fn report(
     cfg: &Config,
     server_url: &str,
     mut stop: watch::Receiver<bool>,
+    restart: watch::Sender<bool>,
+    updated: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<()> {
     let client = Client::new(server_url, cfg.ca_cert.as_deref())?;
     let id_path = cfg.state_dir.join("identity.json");
@@ -577,6 +667,15 @@ async fn report(
         cfg.server_jobs.clone(),
         exec::Jobs::new(cfg.state_dir.clone()),
         job_poll,
+        stop.clone(),
+    ));
+    tokio::spawn(update::run(
+        client.clone(),
+        identity.device_secret.clone(),
+        cfg.update.clone(),
+        cfg.state_dir.clone(),
+        restart,
+        updated,
         stop.clone(),
     ));
 
@@ -788,7 +887,7 @@ fn main() -> anyhow::Result<()> {
                 rest.first().copied().unwrap_or("agent.toml"),
             ))?;
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(async {
+            let exit = rt.block_on(async {
                 let (tx, rx) = watch::channel(false);
                 tokio::spawn(async move {
                     // Ctrl+Break too: Windows' default handler would otherwise end the process
@@ -812,7 +911,16 @@ fn main() -> anyhow::Result<()> {
                     let _ = tx.send(true);
                 });
                 run(cfg, rx).await
-            })
+            })?;
+            if exit == Exit::Updated {
+                // Same arguments, now the new executable at the same path.
+                let exe = std::env::current_exe()?;
+                std::process::Command::new(&exe)
+                    .args(std::env::args_os().skip(1))
+                    .spawn()
+                    .with_context(|| format!("starting the updated {}", exe.display()))?;
+            }
+            Ok(())
         }
         ["direct-fingerprint", rest @ ..] => {
             let cfg = Config::load(std::path::Path::new(
