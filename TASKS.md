@@ -203,6 +203,7 @@ Each module: agent operation + authorization + audit + console tab. Build one fu
 | T-808 | [ ] | | mTLS device identity + cert enrollment/renewal/revocation | §12.1–3 |
 | T-809 | [ ] | | Multi-site / multi-tenant | |
 | T-810 | [ ] | | Signed agent self-update | §12.13 |
+| T-811 | [~] | claude | Console bulk command runner over direct endpoints: multi-select, one confirmed run with target count, parallel with a concurrency cap, per-endpoint status/exit/output, CSV export; each agent still authorizes its own endpoint | §9 serverless slice; server-side job model stays T-800 |
 
 ## Phase 6 — Classroom (§10)
 
