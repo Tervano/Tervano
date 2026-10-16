@@ -8,6 +8,7 @@ mod logfile;
 mod netwatch;
 mod peripherals;
 mod processes;
+mod queue;
 #[cfg(windows)]
 mod reg;
 mod registry;
@@ -420,12 +421,23 @@ async fn report(
         stop.clone(),
     ));
 
-    // Seeded from the clock so a restarted agent never reuses a seq; corrected from the server's ack.
-    let mut seq = now_millis() as u64;
-    let mut reported: Option<DeviceState> = None;
-    let mut pending: Option<EventKind> = None;
-    let mut last_sent = std::time::Instant::now();
+    // Events the Server has not acknowledged yet, including any left from an earlier run.
+    let mut queue = queue::EventQueue::load(cfg.state_dir.join("event-queue.json"));
+    if !queue.is_empty() {
+        tracing::info!(
+            events = queue.len(),
+            "unsent events from an earlier run will be delivered first"
+        );
+    }
+    // Seeded from the clock (and past anything queued) so a restarted agent never reuses a seq;
+    // corrected from the server's ack.
+    let mut seq = (now_millis() as u64).max(queue.max_seq().unwrap_or(0));
+    // Last state put in the queue; a different state becomes the next event.
+    let mut recorded: Option<DeviceState> = None;
+    // The Server accepted an event from this run (it knows the device), so inventory may follow.
+    let mut delivered = false;
     let mut first = true;
+    let mut last_sent = std::time::Instant::now();
     let mut backoff = poll;
     let mut next_inventory = std::time::Instant::now();
     // Next heartbeat is due after a jittered interval, re-drawn after every send.
@@ -435,9 +447,10 @@ async fn report(
 
     loop {
         let state = collect::device_state();
-        if reported.as_ref() != Some(&state) {
-            // Coalesce: only the newest state matters, so it replaces anything unsent.
-            pending = Some(if first {
+        if recorded.as_ref() != Some(&state) {
+            // Every change is kept (device history), not just the newest; the queue is bounded.
+            seq += 1;
+            let kind = if first {
                 EventKind::Startup {
                     state: state.clone(),
                 }
@@ -445,49 +458,63 @@ async fn report(
                 EventKind::StateChanged {
                     state: state.clone(),
                 }
+            };
+            first = false;
+            queue.push(AgentEvent {
+                seq,
+                at: now_millis(),
+                kind,
             });
-        } else if pending.is_none() && last_sent.elapsed() >= heartbeat_every {
-            pending = Some(EventKind::Heartbeat);
+            recorded = Some(state);
         }
 
-        let mut wait = poll;
-        if let Some(kind) = pending.clone() {
+        let batch = if !queue.is_empty() {
+            queue.batch()
+        } else if last_sent.elapsed() >= heartbeat_every {
             seq += 1;
-            match client
-                .send(
-                    &identity.device_secret,
-                    &[AgentEvent {
-                        seq,
-                        at: now_millis(),
-                        kind,
-                    }],
-                )
-                .await
-            {
-                Ok(ack) if ack.last_seq < seq => {
-                    // Should not happen; resend next tick.
-                    tracing::warn!(seq, ack = ack.last_seq, "server did not apply event");
-                }
-                Ok(ack) if ack.last_seq > seq => {
-                    // Our clock went backwards; jump past the server and resend immediately.
-                    seq = ack.last_seq;
+            vec![AgentEvent {
+                seq,
+                at: now_millis(),
+                kind: EventKind::Heartbeat,
+            }]
+        } else {
+            Vec::new()
+        };
+
+        let mut wait = poll;
+        if let (Some(lo), Some(hi)) = (batch.first().map(|e| e.seq), batch.last().map(|e| e.seq)) {
+            match client.send(&identity.device_secret, &batch).await {
+                Ok(ack) if ack.last_seq > hi => {
+                    // The Server already has a higher seq (our clock went backwards), so it
+                    // skipped these: renumber past it and resend at once.
+                    seq = if queue.is_empty() {
+                        ack.last_seq
+                    } else {
+                        queue.renumber_from(ack.last_seq + 1)
+                    };
                     wait = Duration::ZERO;
                 }
-                Ok(_) => {
-                    if let Some(EventKind::Startup { state } | EventKind::StateChanged { state }) =
-                        pending.take()
-                    {
+                Ok(ack) if ack.last_seq < lo => {
+                    // Should not happen; resend next tick.
+                    tracing::warn!(seq = lo, ack = ack.last_seq, "server did not apply events");
+                }
+                Ok(ack) => {
+                    let delivered_now = queue.acked(ack.last_seq);
+                    if queue::EventQueue::has_state(&batch[..delivered_now.min(batch.len())]) {
                         tracing::info!(
-                            sessions = state.sessions.len(),
-                            addrs = state.addresses.len(),
+                            events = delivered_now,
+                            still_queued = queue.len(),
                             "state reported"
                         );
-                        reported = Some(state);
                     }
-                    first = false;
+                    delivered = true;
                     last_sent = std::time::Instant::now();
                     heartbeat_every = jitter(Duration::from_secs(cfg.heartbeat_secs), 0.1);
                     backoff = poll;
+                    if !queue.is_empty() {
+                        // Catching up after an outage: send the rest without waiting.
+                        wait = Duration::ZERO;
+                    }
                 }
                 Err(e) => {
                     if e.to_string().contains("401") {
@@ -497,13 +524,16 @@ async fn report(
                     }
                     // Equal jitter: half fixed, half random, so a reconnect storm spreads out.
                     wait = jitter(backoff, 0.5);
-                    tracing::warn!("report failed: {e:#}; retrying in {wait:?}");
+                    tracing::warn!(
+                        queued = queue.len(),
+                        "report failed: {e:#}; retrying in {wait:?}"
+                    );
                     backoff = (backoff * 2).min(max_backoff);
                 }
             }
         }
-        // Only once the server knows this device (first state report accepted).
-        if !first && std::time::Instant::now() >= next_inventory {
+        // Only once the server knows this device (an event of this run was accepted).
+        if delivered && std::time::Instant::now() >= next_inventory {
             let report = tokio::task::spawn_blocking(|| InventoryReport {
                 collected_at: now_millis(),
                 hardware: inventory::hardware(),
@@ -539,19 +569,30 @@ async fn report(
         }
     }
 
+    // The shutdown goes through the queue too, so it is not lost if the Server is unreachable.
     seq += 1;
-    let bye = AgentEvent {
+    queue.push(AgentEvent {
         seq,
         at: now_millis(),
         kind: EventKind::Shutdown,
-    };
-    if let Err(e) = tokio::time::timeout(
+    });
+    match tokio::time::timeout(
         Duration::from_secs(3),
-        client.send(&identity.device_secret, &[bye]),
+        client.send(&identity.device_secret, &queue.batch()),
     )
     .await
     {
-        tracing::debug!("shutdown notice not sent: {e}");
+        Ok(Ok(ack)) => {
+            queue.acked(ack.last_seq);
+        }
+        Ok(Err(e)) => tracing::debug!("shutdown notice not sent: {e:#}"),
+        Err(_) => tracing::debug!("shutdown notice not sent: timed out"),
+    }
+    if !queue.is_empty() {
+        tracing::info!(
+            events = queue.len(),
+            "unsent events saved for the next start"
+        );
     }
     Ok(())
 }
@@ -587,6 +628,23 @@ fn main() -> anyhow::Result<()> {
             rt.block_on(async {
                 let (tx, rx) = watch::channel(false);
                 tokio::spawn(async move {
+                    // Ctrl+Break too: Windows' default handler would otherwise end the process
+                    // without the shutdown notice.
+                    #[cfg(windows)]
+                    {
+                        match tokio::signal::windows::ctrl_break() {
+                            Ok(mut brk) => {
+                                tokio::select! {
+                                    _ = tokio::signal::ctrl_c() => {}
+                                    _ = brk.recv() => {}
+                                }
+                            }
+                            Err(_) => {
+                                let _ = tokio::signal::ctrl_c().await;
+                            }
+                        }
+                    }
+                    #[cfg(not(windows))]
                     let _ = tokio::signal::ctrl_c().await;
                     let _ = tx.send(true);
                 });

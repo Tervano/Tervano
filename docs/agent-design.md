@@ -14,9 +14,13 @@ polls local state every `poll_secs` (default 15) and sends a full state on
 startup or when the state changes. When idle, it sends a heartbeat at
 `heartbeat_secs` (default 60). Each event carries a monotonically increasing
 sequence number; the Server acknowledgement allows retries without duplicate
-state changes. Network errors use exponential backoff up to five minutes.
-Event-driven WTS/network notifications, jitter, and an on-disk offline queue
-remain tracked in [TASKS.md](../TASKS.md).
+state changes. Network errors use exponential backoff with jitter up to five
+minutes; network address changes wake the loop at once. Startups, state changes
+and shutdowns wait in a bounded on-disk queue (`event-queue.json` in
+`state_dir`, 1,000 events) until the Server acknowledges them, so an outage or
+offline restarts leave the device history complete, in order and with the
+agent's own timestamps; heartbeats are not queued. Event-driven WTS session
+notifications remain tracked in [TASKS.md](../TASKS.md).
 
 Enrollment yields a device ID and secret in `identity.json` under `state_dir`.
 On Windows the secret is protected with DPAPI for the process account; service
