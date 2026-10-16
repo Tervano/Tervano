@@ -15,7 +15,7 @@ the minor version; breaking ones bump the major version.
 | `POST /api/v1/enroll` | Use-limited enrollment token in JSON | Returns device ID and secret once |
 | `POST /api/v1/events` | Device bearer secret (+ device certificate over TLS) | Applies sequenced Agent events; replayed sequence numbers are skipped |
 | `POST /api/v1/device/certificate` | Device bearer secret; the current device certificate if it has one | Signs a CSR from the device's own key (device CA, CN = device id, client auth). `POST /api/v1/enroll` takes an optional `csr` too |
-| `GET /api/v1/devices`, `GET /api/v1/devices/{id}` | Technician bearer token | Search (`q`, optional `group` to search within a device group) and current details |
+| `GET /api/v1/devices`, `GET /api/v1/devices/{id}` | Technician bearer token | Search (`q`, optional `group` to search within a device group, optional `ids` to ask which of up to 200 devices match, used for live row updates) and current details |
 | `GET /api/v1/reports/software`, `/reports/software/devices`, `/reports/os`, `/reports/hardware` | Technician bearer token | Fleet reports from stored state and inventory, limited to the caller's device scope |
 | `GET /api/v1/compliance`, `POST /api/v1/compliance`, `DELETE /api/v1/compliance/{id}`, `GET /api/v1/compliance/{id}/results` | Technician bearer token | Compliance checks evaluated over the caller's devices; writes need operator without a scope |
 | `GET /api/v1/me` | Technician bearer token | Name, role, device scope and token expiry of the caller |

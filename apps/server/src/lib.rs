@@ -1118,6 +1118,9 @@ struct SearchParams {
     q: String,
     /// Only devices in this group (T-801).
     group: Option<Uuid>,
+    /// Comma-separated device ids: only these, if they match (T-817). Lets a Console find out which
+    /// changed devices belong in its current result without repeating the whole search.
+    ids: Option<String>,
     #[serde(default = "default_limit")]
     limit: u32,
 }
@@ -1194,6 +1197,26 @@ async fn search_devices(
     }
     let q = q.as_str();
     let limit = p.limit.clamp(1, 1000) as i64;
+    let only_ids = match &p.ids {
+        None => None,
+        Some(list) => {
+            let ids: Vec<Uuid> = list
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.trim().parse())
+                .collect::<Result<_, _>>()
+                .map_err(|_| {
+                    AppError::new(err(StatusCode::BAD_REQUEST, "ids must be device ids"))
+                })?;
+            if ids.len() > 200 {
+                return Err(AppError::new(err(
+                    StatusCode::BAD_REQUEST,
+                    "at most 200 ids per request",
+                )));
+            }
+            Some(serde_json::to_string(&ids).expect("ids serialize"))
+        }
+    };
     let (condition, value) = search_condition(q);
     let rows = sqlx::query(&format!(
         "SELECT id, hostname, os, last_seen, state_json FROM devices d
@@ -1201,12 +1224,14 @@ async fn search_devices(
            AND (?3 IS NULL OR id IN (SELECT device_id FROM group_members WHERE group_id = ?3))
            AND (?4 IS NULL OR id IN (SELECT m.device_id FROM group_members m
                JOIN technician_scopes ts ON ts.group_id = m.group_id WHERE ts.technician = ?4))
-         ORDER BY hostname COLLATE NOCASE LIMIT ?2"
+           AND (?5 IS NULL OR id IN (SELECT value FROM json_each(?5)))
+         ORDER BY hostname COLLATE NOCASE, id LIMIT ?2"
     ))
     .bind(value)
     .bind(limit)
     .bind(&member_of)
     .bind(tech.scope_name())
+    .bind(only_ids)
     .fetch_all(&s.db)
     .await?;
     let cutoff = now_millis() - s.offline_after_ms;

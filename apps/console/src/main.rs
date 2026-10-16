@@ -121,6 +121,8 @@ enum Message {
     Search,
     Refresh,
     SearchDone(u64, Result<Vec<DeviceSummary>, String>),
+    /// (search generation, changed ids, which of them match now).
+    Patched(u64, Vec<uuid::Uuid>, Result<Vec<DeviceSummary>, String>),
     Select(uuid::Uuid),
     DetailsDone(Result<DeviceDetails, String>),
     InventoryDone(uuid::Uuid, Result<Option<InventoryReport>, String>),
@@ -639,6 +641,10 @@ struct Console {
     live: bool,
     /// A pushed change arrived; refresh once the debounce tick fires.
     dirty: bool,
+    /// Devices changed since the last refresh; their rows are patched in place (T-817).
+    changed: std::collections::BTreeSet<uuid::Uuid>,
+    /// Missed changes (resync, reconnect, failed patch): the next refresh repeats the search.
+    needs_full: bool,
     direct_input: String,
     direct_notice: Option<String>,
     pending_trust: Option<PendingTrust>,
@@ -769,6 +775,8 @@ impl Console {
             inventory: None,
             live: false,
             dirty: false,
+            changed: Default::default(),
+            needs_full: false,
             direct_input: String::new(),
             direct_notice: None,
             pending_trust: None,
@@ -1112,11 +1120,65 @@ impl Console {
             Message::Refresh => {
                 if self.page == Page::Devices && !self.settings.token.is_empty() && !self.loading {
                     self.dirty = false;
+                    let changed: Vec<uuid::Uuid> =
+                        std::mem::take(&mut self.changed).into_iter().collect();
                     let details = self
                         .selected
+                        .filter(|id| self.needs_full || !self.live || changed.contains(id))
                         .map(|id| self.load_details(id))
                         .unwrap_or_else(Task::none);
-                    return Task::batch([self.search(), details]);
+                    // Polling, catching up, or more changes than one patch request carries.
+                    if !self.live || self.needs_full || changed.is_empty() || changed.len() > 200 {
+                        self.needs_full = false;
+                        return Task::batch([self.search(), details]);
+                    }
+                    let (generation, client, q, group) = (
+                        self.search_gen,
+                        self.client(),
+                        self.query.clone(),
+                        self.groups.active,
+                    );
+                    let patch = Task::perform(
+                        {
+                            let changed = changed.clone();
+                            async move { client?.search_ids(&q, group, &changed).await }
+                        },
+                        move |r| Message::Patched(generation, changed.clone(), r),
+                    );
+                    return Task::batch([patch, details]);
+                }
+            }
+            Message::Patched(generation, ids, r) => {
+                // A newer search replaced the list; its result already includes these changes.
+                if generation != self.search_gen {
+                    return Task::none();
+                }
+                match (r, &mut self.devices) {
+                    (Ok(matching), Ok(devices)) => {
+                        devices.retain(|d| !ids.contains(&d.id));
+                        let (added, kept) = (matching.len(), devices.len());
+                        devices.extend(matching);
+                        // Same order as the server (hostname, case-insensitive) and its 100-row cap.
+                        // Ties (same hostname) by id, as the server orders them.
+                        devices.sort_by_key(|d| (d.hostname.to_lowercase(), d.id.to_string()));
+                        devices.truncate(100);
+                        tracing::debug!(
+                            changed = ids.len(),
+                            matching = added,
+                            kept,
+                            "device rows patched"
+                        );
+                    }
+                    (Err(e), _) => {
+                        tracing::warn!("patching device rows failed: {e}; repeating the search");
+                        self.needs_full = true;
+                        self.dirty = true;
+                    }
+                    // The list itself is an error; the next full search replaces it.
+                    (Ok(_), Err(_)) => {
+                        self.needs_full = true;
+                        self.dirty = true;
+                    }
                 }
             }
             Message::SearchDone(generation, r) => {
@@ -1943,6 +2005,7 @@ impl Console {
                     tracing::info!("live updates connected");
                     self.live = true;
                     // Catch up on anything missed while disconnected.
+                    self.needs_full = true;
                     self.dirty = true;
                 }
                 api::LiveEvent::Disconnected(e) => {
@@ -1952,9 +2015,13 @@ impl Console {
                 }
                 api::LiveEvent::Changed(id) => {
                     tracing::debug!(%id, "device changed");
+                    self.changed.insert(id);
                     self.dirty = true;
                 }
-                api::LiveEvent::Resync => self.dirty = true,
+                api::LiveEvent::Resync => {
+                    self.needs_full = true;
+                    self.dirty = true;
+                }
             },
             Message::ToggleTheme => {
                 self.settings.dark = !self.settings.dark;
@@ -2012,8 +2079,8 @@ impl Console {
             );
         }
         if self.dirty {
-            // Debounce: a burst of pushed changes becomes one refresh.
-            // shortcut: re-runs the whole current search per burst; patch rows in place if this gets heavy (T-817).
+            // Debounce: a burst of pushed changes becomes one refresh, which patches just the
+            // changed rows (T-817).
             subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Refresh));
         } else if !self.live {
             subs.push(iced::time::every(Duration::from_secs(15)).map(|_| Message::Refresh));

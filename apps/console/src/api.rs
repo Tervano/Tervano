@@ -194,6 +194,28 @@ impl Client {
         .map(|_| ())
     }
 
+    /// Which of `ids` match the search (T-817): used to patch changed rows in place.
+    pub async fn search_ids(
+        &self,
+        q: &str,
+        group: Option<uuid::Uuid>,
+        ids: &[uuid::Uuid],
+    ) -> Result<Vec<DeviceSummary>, String> {
+        let ids = ids
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut req = self
+            .http
+            .get(format!("{}/api/v1/devices", self.base))
+            .query(&[("q", q), ("ids", ids.as_str())]);
+        if let Some(g) = group {
+            req = req.query(&[("group", g.to_string())]);
+        }
+        self.get(req).await
+    }
+
     pub async fn groups(&self) -> Result<Vec<DeviceGroup>, String> {
         self.get(self.http.get(format!("{}/api/v1/groups", self.base)))
             .await
