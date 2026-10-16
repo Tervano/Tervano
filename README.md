@@ -70,6 +70,7 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Systems | Interactive remote terminal | Implemented | Windows | Direct channel: live PowerShell or CMD session as the agent's account; operators only; input logged by hash; idle sessions close after 15 minutes |
 | Systems | Remote PowerShell / CMD | Implemented | Windows | Direct channel: run scripts as the agent's account with live output, exit code, timeout and stop (whole process tree); operators only; scripts are hashed in the log, not stored. Signed-in-user context not yet |
 | Systems | Registry management | Implemented | Windows | Direct channel: browse any hive (64/32-bit view), edit typed values, delete values/keys with confirmation, export `.reg`; changes are operator-only and logged |
+| Automation | Device groups | Partial | Windows | Static groups and saved-search groups on the Devices page; pick a group to list or target its devices. AD OU groups need Phase 3 |
 | Automation | Bulk actions | Partial | Windows | Console: run a command on many direct endpoints at once, or queue a server job for up to 1000 server-managed devices (agents opt in with `[server_jobs]` per technician); per-device results and CSV export. Jobs can start later, roll out a few devices at a time, be cancelled while running, and be rerun on the devices that failed |
 | Classroom | Live thumbnail grid | Planned | Windows | T-900+ |
 

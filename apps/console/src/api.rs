@@ -91,13 +91,56 @@ impl Client {
             .map_err(|e| format!("Unexpected server response: {e}"))
     }
 
-    pub async fn search(&self, q: &str) -> Result<Vec<DeviceSummary>, String> {
+    /// Device search, optionally within a group.
+    pub async fn search(
+        &self,
+        q: &str,
+        group: Option<uuid::Uuid>,
+    ) -> Result<Vec<DeviceSummary>, String> {
+        let mut req = self
+            .http
+            .get(format!("{}/api/v1/devices", self.base))
+            .query(&[("q", q)]);
+        if let Some(g) = group {
+            req = req.query(&[("group", g.to_string())]);
+        }
+        self.get(req).await
+    }
+
+    pub async fn groups(&self) -> Result<Vec<DeviceGroup>, String> {
+        self.get(self.http.get(format!("{}/api/v1/groups", self.base)))
+            .await
+    }
+
+    pub async fn create_group(&self, g: &GroupCreate) -> Result<DeviceGroup, String> {
         self.get(
             self.http
-                .get(format!("{}/api/v1/devices", self.base))
-                .query(&[("q", q)]),
+                .post(format!("{}/api/v1/groups", self.base))
+                .json(g),
         )
         .await
+    }
+
+    pub async fn change_members(
+        &self,
+        id: uuid::Uuid,
+        change: &GroupMembers,
+    ) -> Result<DeviceGroup, String> {
+        self.get(
+            self.http
+                .post(format!("{}/api/v1/groups/{id}/members", self.base))
+                .json(change),
+        )
+        .await
+    }
+
+    pub async fn delete_group(&self, id: uuid::Uuid) -> Result<(), String> {
+        self.send(
+            self.http
+                .delete(format!("{}/api/v1/groups/{id}", self.base)),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Latest inventory snapshot the agent sent; `None` until it has sent one.

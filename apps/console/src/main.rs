@@ -4,6 +4,7 @@
 mod api;
 mod creds;
 mod direct;
+mod groups;
 mod jobs;
 
 use iced::widget::{
@@ -240,6 +241,7 @@ enum Message {
     BulkDone(String, Result<ExecStatus, String>),
     BulkExport,
     Job(jobs::JobMsg),
+    Group(groups::GroupMsg),
 }
 
 /// How many endpoints a bulk run works on at once.
@@ -716,6 +718,7 @@ struct Console {
     bulk_results: Vec<(String, Option<Result<ExecStatus, String>>)>,
     bulk_notice: Option<Result<String, String>>,
     jobs: jobs::JobsState,
+    groups: groups::GroupsState,
 }
 
 impl Console {
@@ -825,8 +828,13 @@ impl Console {
             bulk_results: Vec::new(),
             bulk_notice: None,
             jobs: jobs::JobsState::new(),
+            groups: groups::GroupsState::new(),
         };
-        let task = if configured { c.search() } else { Task::none() };
+        let task = if configured {
+            Task::batch([c.search(), c.load_groups()])
+        } else {
+            Task::none()
+        };
         (c, task)
     }
 
@@ -841,8 +849,13 @@ impl Console {
     fn search(&mut self) -> Task<Message> {
         self.search_gen += 1;
         self.loading = true;
-        let (generation, client, q) = (self.search_gen, self.client(), self.query.clone());
-        Task::perform(async move { client?.search(&q).await }, move |r| {
+        let (generation, client, q, group) = (
+            self.search_gen,
+            self.client(),
+            self.query.clone(),
+            self.groups.active,
+        );
+        Task::perform(async move { client?.search(&q, group).await }, move |r| {
             Message::SearchDone(generation, r)
         })
     }
@@ -963,6 +976,7 @@ impl Console {
                 }
             }
             Message::Job(m) => return self.jobs_update(m),
+            Message::Group(m) => return self.groups_update(m),
             Message::QueryChanged(q) => self.query = q,
             Message::Search => return self.search(),
             Message::Refresh => {
@@ -1019,7 +1033,7 @@ impl Console {
                     self.page = Page::Direct;
                 } else {
                     self.page = Page::Devices;
-                    return self.search();
+                    return Task::batch([self.search(), self.load_groups()]);
                 }
             }
             Message::TechCertChanged(s) => self.draft.tech_cert = s,
@@ -2018,7 +2032,9 @@ impl Console {
             .spacing(12)
             .into(),
         };
-        column![search, content].spacing(12).into()
+        column![self.groups_bar(), search, content]
+            .spacing(12)
+            .into()
     }
 
     fn details_view<'a>(

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.17";
+pub const PROTOCOL_VERSION: &str = "1.18";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -662,6 +662,51 @@ pub struct TerminalOutput {
 pub struct TerminalSince {
     #[serde(default)]
     pub since: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupKind {
+    /// Explicit member list.
+    Static,
+    /// A saved device search, evaluated whenever the group is listed.
+    Query,
+}
+
+/// A device group (T-801). List its devices with `GET /api/v1/devices?group=<id>&q=`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceGroup {
+    pub id: Uuid,
+    pub name: String,
+    pub kind: GroupKind,
+    /// The saved search of a query group.
+    pub query: Option<String>,
+    pub created_by: String,
+    pub created_at: Millis,
+    /// Member count of a static group; `None` for a query group.
+    pub members: Option<u32>,
+}
+
+/// Body of `POST /api/v1/groups`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupCreate {
+    pub name: String,
+    pub kind: GroupKind,
+    /// Required for a query group, absent for a static one.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Initial members of a static group (up to 1000).
+    #[serde(default)]
+    pub devices: Vec<Uuid>,
+}
+
+/// Body of `POST /api/v1/groups/{id}/members` (static groups only; up to 1000 changes).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GroupMembers {
+    #[serde(default)]
+    pub add: Vec<Uuid>,
+    #[serde(default)]
+    pub remove: Vec<Uuid>,
 }
 
 /// Most devices one server job may target.

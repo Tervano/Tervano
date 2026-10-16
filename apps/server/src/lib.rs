@@ -1,6 +1,7 @@
 //! Tervano Server library: HTTP API + persistence. `main.rs` is the CLI around it.
 
 pub mod audit_archive;
+mod groups;
 mod jobs;
 
 use axum::{
@@ -9,7 +10,7 @@ use axum::{
     http::{HeaderValue, StatusCode, header, request::Parts},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -514,6 +515,12 @@ pub fn app(state: AppState) -> Router {
         .route("/devices/{id}", get(device_details))
         .route("/devices/{id}/events", get(device_events))
         .route("/audit", get(list_audit))
+        .route(
+            "/groups",
+            get(groups::list_groups).post(groups::create_group),
+        )
+        .route("/groups/{id}", delete(groups::delete_group))
+        .route("/groups/{id}/members", post(groups::change_members))
         .route("/jobs", post(jobs::create_job).get(jobs::list_jobs))
         .route("/jobs/{id}", get(jobs::get_job))
         .route("/jobs/{id}/cancel", post(jobs::cancel_job))
@@ -997,6 +1004,8 @@ async fn ingest_events(
 struct SearchParams {
     #[serde(default)]
     q: String,
+    /// Only devices in this group (T-801).
+    group: Option<Uuid>,
     #[serde(default = "default_limit")]
     limit: u32,
 }
@@ -1021,7 +1030,21 @@ async fn search_devices(
     _tech: TechAuth,
     Query(p): Query<SearchParams>,
 ) -> Result<Json<Vec<DeviceSummary>>, AppError> {
-    let q = p.q.trim();
+    let mut q = p.q.trim().to_owned();
+    // Static group: filter by membership. Query group: its saved search runs instead, and what the
+    // technician typed narrows that result below.
+    let mut member_of = None;
+    let mut narrow = None;
+    if let Some(g) = p.group {
+        match groups::lookup(&s.db, g).await? {
+            (GroupKind::Static, _) => member_of = Some(g.to_string()),
+            (GroupKind::Query, stored) => {
+                narrow = Some(q.to_lowercase()).filter(|n| !n.is_empty());
+                q = stored.unwrap_or_default();
+            }
+        }
+    }
+    let q = q.as_str();
     // `DOMAIN\user` → search on the user part.
     let q = q.rsplit_once('\\').map_or(q, |(_, user)| user);
     let limit = p.limit.clamp(1, 1000) as i64;
@@ -1033,10 +1056,12 @@ async fn search_devices(
             "SELECT id, hostname, os, last_seen, state_json FROM devices d
              WHERE revoked = 0
                AND id IN (SELECT device_id FROM device_search WHERE device_search MATCH ?1)
+               AND (?3 IS NULL OR id IN (SELECT device_id FROM group_members WHERE group_id = ?3))
              ORDER BY hostname COLLATE NOCASE LIMIT ?2",
         )
         .bind(phrase)
         .bind(limit)
+        .bind(&member_of)
         .fetch_all(&s.db)
         .await?
     } else {
@@ -1047,10 +1072,12 @@ async fn search_devices(
                 hostname LIKE ?1 ESCAPE '\\'
                 OR EXISTS (SELECT 1 FROM device_sessions s WHERE s.device_id = d.id AND s.username LIKE ?1 ESCAPE '\\')
                 OR EXISTS (SELECT 1 FROM device_addresses a WHERE a.device_id = d.id AND a.address LIKE ?1 ESCAPE '\\'))
+               AND (?3 IS NULL OR id IN (SELECT device_id FROM group_members WHERE group_id = ?3))
              ORDER BY hostname COLLATE NOCASE LIMIT ?2",
         )
         .bind(&pattern)
         .bind(limit)
+        .bind(&member_of)
         .fetch_all(&s.db)
         .await?
     };
@@ -1068,6 +1095,13 @@ async fn search_devices(
                 last_seen,
                 primary_ip: primary_ip(&state.addresses),
                 users: state.sessions.iter().map(|u| u.username.clone()).collect(),
+            })
+        })
+        .filter(|d: &DeviceSummary| {
+            narrow.as_deref().is_none_or(|n| {
+                d.hostname.to_lowercase().contains(n)
+                    || d.users.iter().any(|u| u.to_lowercase().contains(n))
+                    || d.primary_ip.as_deref().is_some_and(|ip| ip.contains(n))
             })
         })
         .collect();

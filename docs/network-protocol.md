@@ -14,7 +14,8 @@ the minor version; breaking ones bump the major version.
 | `GET /healthz`, `GET /readyz` | None | Process health and database readiness |
 | `POST /api/v1/enroll` | Use-limited enrollment token in JSON | Returns device ID and secret once |
 | `POST /api/v1/events` | Device bearer secret | Applies sequenced Agent events; replayed sequence numbers are skipped |
-| `GET /api/v1/devices`, `GET /api/v1/devices/{id}` | Technician bearer token | Search and current details |
+| `GET /api/v1/devices`, `GET /api/v1/devices/{id}` | Technician bearer token | Search (`q`, optional `group` to search within a device group) and current details |
+| `GET /api/v1/groups`, `POST /api/v1/groups`, `DELETE /api/v1/groups/{id}`, `POST /api/v1/groups/{id}/members` | Technician bearer token | Device groups: static (member list) or query (saved search evaluated on read) |
 | `GET /api/v1/devices/{id}/events` | Technician bearer token | Newest-first retained event history, up to 100 rows per page |
 | `GET /api/v1/audit` | Technician bearer token | Paginated audit records |
 | `GET /api/v1/stream` | Technician bearer token | SSE `device` notifications and `resync` on lag |
