@@ -124,7 +124,7 @@ Status: `[ ]` todo · `[~]` locked / in progress by the owner · `[x]` done · `
 | T-400 | [x] | claude | Agent direct listener: HTTPS (rustls) on `[direct].listen`, mandatory client certs, `GET /v1/device`; agent self-generated cert (key DPAPI-protected), `TervanoAgent direct-fingerprint` for pinning; `server_url` now optional (serverless agent) | Verified 2026-10-15 on Win 11 25H2 with a Python client pinning the fingerprint: alice→200, no protocol header→400; identity stable across restarts; server+direct combined mode OK. Console client is T-311 |
 | T-401 | [x] | claude | Direct authz: technician client certs from the org CA (`tervano-server cert tech --name`, ClientAuth EKU, CN = technician), optional `allowed_technicians`, every decision logged by the agent | Verified: bob (valid cert, not allowed)→403; no cert, rogue-CA cert, server cert as client → rejected in TLS handshake. Gaps: no CRL (revoke via allowlist + 1-year expiry), Kerberos option not done |
 | T-402 | [~] | claude | Agent-side per-operation authorization checks | §12.9. Done for current ops: `direct::authorize` checks every request; read ops → `allowed_technicians`, machine-changing ops → explicit `operators` (default nobody). Stays open until configurable per-op roles land with RBAC (T-806) |
-| T-403 | [ ] | | Server connection-authorization tickets (short-lived, signed) agents can verify offline | §2C non-negotiable outage behaviour |
+| T-403 | [~] | claude | Server connection-authorization tickets (short-lived, signed) agents can verify offline | §2C non-negotiable outage behaviour |
 | T-404 | [ ] | | QUIC transport (quinn) with TCP/TLS fallback | §6 |
 
 ## Phase 2 — Remote control (§6)
