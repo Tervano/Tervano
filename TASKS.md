@@ -198,7 +198,7 @@ Each module: agent operation + authorization + audit + console tab. Build one fu
 | T-803 | [x] | claude | Per-endpoint authz for server jobs: off unless the agent's `[server_jobs] enabled = true`, and only for technicians listed in `technicians` (`[\"*\"]` = all); refusals come back as a per-device `refused: …` result instead of a job stuck pending (disabled agents claim at the heartbeat interval). Confirmation names the shell and device count. Server-side roles remain T-806 | Verified 2026-10-16 with the T-800 run: disabled agent and non-listed technician both refused with the reason shown per device; `enabled = true` without `technicians` refused at startup |
 | T-804 | [ ] | | Reports + export (CSV/JSON), execution history | |
 | T-805 | [ ] | | Compliance checks + remediation | |
-| T-806 | [ ] | | RBAC: roles, endpoint scopes, action scopes; UI hides disallowed modules | §12.4 |
+| T-806 | [~] | claude | RBAC: roles, endpoint scopes, action scopes; UI hides disallowed modules | §12.4 |
 | T-807 | [ ] | | OIDC + Integrated Windows Auth for technicians | §12 auth modes |
 | T-808 | [ ] | | mTLS device identity + cert enrollment/renewal/revocation | §12.1–3 |
 | T-809 | [ ] | | Multi-site / multi-tenant | |
