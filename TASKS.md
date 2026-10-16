@@ -86,8 +86,8 @@ Status: `[ ]` todo · `[~]` locked / in progress by the owner · `[x]` done · `
 | T-213 | [ ] | | Bounded on-disk event queue for offline periods | §5 |
 | T-214 | [x] | claude | Measure + document idle CPU/RAM (target ≤50 MB) | Measured 2026-10-15, release build, Win 11 25H2 (Ryzen 9800X3D, 16 logical CPUs), server reporting + direct listener, 3 min idle after startup inventory: working set 29.7 MB flat, private 8.6 MB, CPU 16 ms / 180 s (≈0.009% of one core), 22 threads, 357 handles, binary 9.3 MB. Not yet measured as the SYSTEM service or after heavy direct-channel use |
 | T-215 | [x] | claude | Agent `ca_cert` option (+ Windows cert store via native roots); agent/console refuse `http://` to non-loopback | Verified agent over TLS with `ca_cert` and refusal of `http://192.168.1.142`. Console CA field added, not GUI-verified. Pinning dropped: CA trust is sufficient for now |
-| T-216 | [ ] | | Agent log rotation / Windows Event Log sink (service mode writes one unrotated `agent.log`) | |
-| T-218 | [ ] | | Service mode: errors before log init (bad config, icacls failure) are lost — write them to the Windows Event Log | |
+| T-216 | [~] | claude | Agent log rotation / Windows Event Log sink (service mode writes one unrotated `agent.log`) | |
+| T-218 | [~] | claude | Service mode: errors before log init (bad config, icacls failure) are lost — write them to the Windows Event Log | |
 | T-217 | [x] | claude | Heartbeat ±10% jitter (re-drawn after each send) and equal-jitter backoff (50–100%) on report failures | Verified 2026-10-15: a revoked agent's retry came at 47 s for a 60 s backoff. Uses uuid v4 (OS RNG) — no new dependency |
 | T-219 | [ ] | | Remove or securely retire agent bootstrap enrollment token after enrollment | Multi-use tokens may remain in plaintext `agent.toml` after `identity.json` is written. Define safe recovery/re-enrollment flow first. |
 
@@ -100,7 +100,7 @@ Status: `[ ]` todo · `[~]` locked / in progress by the owner · `[x]` done · `
 | T-303 | [x] | claude | Device list: name, online dot, IP, logged-in user, OS, last seen | |
 | T-304 | [x] | claude | Device details panel: summary, sessions, addresses, agent version | |
 | T-305 | [x] | claude | Loading / empty / error states | |
-| T-306 | [ ] | | Token stored in Windows Credential Manager, not plaintext | §12.11 |
+| T-306 | [~] | claude | Token stored in Windows Credential Manager, not plaintext | §12.11 |
 | T-307 | [ ] | | Virtualized list for 10k+ rows; column sort/filter/select | §11 |
 | T-308 | [ ] | | Keyboard-first: Ctrl+K focus search, arrows/Enter in results, command palette | §11 |
 | T-309 | [ ] | | Recent devices, favorites, search history | §11 |
