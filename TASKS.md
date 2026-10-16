@@ -203,7 +203,7 @@ Each module: agent operation + authorization + audit + console tab. Build one fu
 | T-808 | [ ] | | mTLS device identity + cert enrollment/renewal/revocation | §12.1–3 |
 | T-809 | [ ] | | Multi-site / multi-tenant | |
 | T-810 | [ ] | | Signed agent self-update | §12.13 |
-| T-811 | [~] | claude | Console bulk command runner over direct endpoints: multi-select, one confirmed run with target count, parallel with a concurrency cap, per-endpoint status/exit/output, CSV export; each agent still authorizes its own endpoint | §9 serverless slice; server-side job model stays T-800 |
+| T-811 | [x] | claude | Console bulk command runner over direct endpoints: checkboxes + select all on the Direct page, one confirmation naming the target count, parallel runs capped at 8 (each agent's own exec job: timeout, tree kill, operator check), per-endpoint status/exit/first output line with totals, CSV export (formula-injection guarded) | Verified 2026-10-15 with two live agents and one dead endpoint through the Console's orchestration code: operator agent ran the script (exit 0, 4.1 s), the agent without operators answered \"Not authorized\" and logged the refusal, the dead endpoint failed cleanly, all concurrently. Panel and CSV export not clicked by eye (T-314). Server-side scheduled jobs remain T-800/T-802 |
 
 ## Phase 6 — Classroom (§10)
 

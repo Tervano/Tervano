@@ -675,3 +675,25 @@ pub async fn terminal_close(t: Target, id: uuid::Uuid) -> Result<(), String> {
     .await
     .map(|_| ())
 }
+
+/// Runs a command job on one agent to completion (start, then poll), holding a permit from `gate`
+/// so a bulk run never has more than the gate's size in flight.
+pub async fn run_to_completion(
+    t: Target,
+    req: ExecRequest,
+    gate: std::sync::Arc<tokio::sync::Semaphore>,
+) -> Result<ExecStatus, String> {
+    let _permit = gate.acquire_owned().await.map_err(|e| e.to_string())?;
+    // The agent enforces the timeout; this only stops us waiting forever on a vanished agent.
+    let give_up = std::time::Instant::now()
+        + Duration::from_secs(u64::from(req.timeout_secs.unwrap_or(60)) + 30);
+    let mut s = exec_start(t.clone(), req).await?;
+    while s.state == ExecState::Running {
+        if std::time::Instant::now() > give_up {
+            return Err("no result from the agent in time".into());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        s = exec_status(t.clone(), s.id).await?;
+    }
+    Ok(s)
+}

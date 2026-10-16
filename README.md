@@ -70,7 +70,7 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Systems | Interactive remote terminal | Implemented | Windows | Direct channel: live PowerShell or CMD session as the agent's account; operators only; input logged by hash; idle sessions close after 15 minutes |
 | Systems | Remote PowerShell / CMD | Implemented | Windows | Direct channel: run scripts as the agent's account with live output, exit code, timeout and stop (whole process tree); operators only; scripts are hashed in the log, not stored. Signed-in-user context not yet |
 | Systems | Registry management | Implemented | Windows | Direct channel: browse any hive (64/32-bit view), edit typed values, delete values/keys with confirmation, export `.reg`; changes are operator-only and logged |
-| Automation | Bulk actions | Planned | Windows | T-800+ |
+| Automation | Bulk actions | Partial | Windows | Console: run a command on many direct endpoints at once with per-computer results and CSV export; each agent enforces its own permissions. Server-side scheduled jobs not yet (T-800+) |
 | Classroom | Live thumbnail grid | Planned | Windows | T-900+ |
 
 Competitor comparison: `docs/feature-matrix.md` (T-981, not written yet).

@@ -227,7 +227,20 @@ enum Message {
     TermPoll,
     TermUpdate(Result<TerminalOutput, String>),
     TermClose,
+    BulkToggle(String, bool),
+    BulkSelectAll(bool),
+    BulkShell(ShellChoice),
+    BulkEdit(text_editor::Action),
+    BulkTimeout(String),
+    BulkAsk,
+    BulkConfirm,
+    BulkCancel,
+    BulkDone(String, Result<ExecStatus, String>),
+    BulkExport,
 }
+
+/// How many endpoints a bulk run works on at once.
+const BULK_PARALLEL: usize = 8;
 
 /// Keep at most this much terminal scrollback in the Console.
 const TERM_SCROLLBACK: usize = 512 * 1024;
@@ -690,6 +703,15 @@ struct Console {
     term_exited: Option<Option<i32>>,
     term_input: String,
     term_notice: Option<String>,
+    /// Endpoints ticked for a bulk run (addresses).
+    bulk_selected: std::collections::BTreeSet<String>,
+    bulk_shell: Shell,
+    bulk_script: text_editor::Content,
+    bulk_timeout: String,
+    bulk_confirm: bool,
+    /// Per endpoint: `None` while running.
+    bulk_results: Vec<(String, Option<Result<ExecStatus, String>>)>,
+    bulk_notice: Option<Result<String, String>>,
 }
 
 impl Console {
@@ -791,6 +813,13 @@ impl Console {
             term_exited: None,
             term_input: String::new(),
             term_notice: None,
+            bulk_selected: Default::default(),
+            bulk_shell: Shell::Powershell,
+            bulk_script: text_editor::Content::new(),
+            bulk_timeout: "120".into(),
+            bulk_confirm: false,
+            bulk_results: Vec::new(),
+            bulk_notice: None,
         };
         let task = if configured { c.search() } else { Task::none() };
         (c, task)
@@ -1622,6 +1651,89 @@ impl Console {
                     return Task::perform(direct::terminal_close(t, *id), Message::TermSent);
                 }
             }
+            Message::BulkToggle(addr, on) => {
+                if on {
+                    self.bulk_selected.insert(addr);
+                } else {
+                    self.bulk_selected.remove(&addr);
+                }
+                self.bulk_confirm = false;
+            }
+            Message::BulkSelectAll(on) => {
+                self.bulk_selected = if on {
+                    self.settings
+                        .endpoints
+                        .iter()
+                        .map(|e| e.address.clone())
+                        .collect()
+                } else {
+                    Default::default()
+                };
+                self.bulk_confirm = false;
+                // Clearing the selection after a finished run returns to the device view.
+                if !on && self.bulk_results.iter().all(|(_, r)| r.is_some()) {
+                    self.bulk_results.clear();
+                    self.bulk_notice = None;
+                }
+            }
+            Message::BulkShell(s) => self.bulk_shell = s.0,
+            Message::BulkEdit(a) => self.bulk_script.perform(a),
+            Message::BulkTimeout(t) => {
+                self.bulk_timeout = t.chars().filter(char::is_ascii_digit).take(4).collect()
+            }
+            Message::BulkAsk => {
+                self.bulk_notice = None;
+                if self.bulk_script.text().trim().is_empty() {
+                    self.bulk_notice = Some(Err("Write a script first.".into()));
+                } else {
+                    self.bulk_confirm = true;
+                }
+            }
+            Message::BulkCancel => self.bulk_confirm = false,
+            Message::BulkConfirm => {
+                self.bulk_confirm = false;
+                self.bulk_notice = None;
+                let req = ExecRequest {
+                    shell: self.bulk_shell,
+                    script: self.bulk_script.text(),
+                    context: ExecContext::Agent,
+                    timeout_secs: self.bulk_timeout.parse().ok(),
+                };
+                let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(BULK_PARALLEL));
+                self.bulk_results = self
+                    .bulk_selected
+                    .iter()
+                    .map(|a| (a.clone(), None))
+                    .collect();
+                let tasks: Vec<Task<Message>> = self
+                    .bulk_selected
+                    .iter()
+                    .map(|addr| {
+                        let addr = addr.clone();
+                        match self.target(&addr) {
+                            Some(t) => Task::perform(
+                                direct::run_to_completion(t, req.clone(), gate.clone()),
+                                move |r| Message::BulkDone(addr.clone(), r),
+                            ),
+                            None => Task::done(Message::BulkDone(
+                                addr,
+                                Err("endpoint was removed".into()),
+                            )),
+                        }
+                    })
+                    .collect();
+                return Task::batch(tasks);
+            }
+            Message::BulkDone(addr, r) => {
+                if let Some(slot) = self.bulk_results.iter_mut().find(|(a, _)| *a == addr) {
+                    slot.1 = Some(r);
+                }
+            }
+            Message::BulkExport => {
+                if let Some(dir) = downloads_dir() {
+                    self.bulk_notice = Some(export_bulk_csv(&dir, &self.bulk_results));
+                }
+            }
             Message::KillDone(r) => {
                 self.kill_notice = Some(r);
                 if let Some(addr) = self.direct_selected.clone() {
@@ -2023,7 +2135,10 @@ impl Console {
                     None => (false, "not checked yet".into()),
                 };
                 let selected = self.direct_selected.as_deref() == Some(e.address.as_str());
+                let addr = e.address.clone();
                 row![
+                    checkbox(self.bulk_selected.contains(&e.address))
+                        .on_toggle(move |on| Message::BulkToggle(addr.clone(), on)),
                     button(
                         row![
                             status_dot(online),
@@ -2055,10 +2170,35 @@ impl Console {
                 .align_y(Alignment::Center)
                 .into()
             });
-            scrollable(column(rows).spacing(2))
-                .height(Length::Fill)
-                .into()
+            column![
+                checkbox(
+                    !self.settings.endpoints.is_empty()
+                        && self.bulk_selected.len() == self.settings.endpoints.len()
+                )
+                .label("Select all for a bulk run")
+                .on_toggle(Message::BulkSelectAll),
+                scrollable(column(rows).spacing(2)).height(Length::Fill),
+            ]
+            .spacing(6)
+            .into()
         };
+
+        // Ticking endpoints switches the right-hand panel to the bulk runner.
+        if !self.bulk_selected.is_empty() || !self.bulk_results.is_empty() {
+            return column![
+                top,
+                row![
+                    container(list).width(Length::FillPortion(1)),
+                    rule::vertical(1),
+                    container(self.bulk_view())
+                        .width(Length::FillPortion(2))
+                        .padding([0, 8]),
+                ]
+                .spacing(12)
+            ]
+            .spacing(12)
+            .into();
+        }
 
         let content: Element<_> = match self
             .direct_selected
@@ -2142,6 +2282,133 @@ impl Console {
             }
         };
         column![top, content].spacing(12).into()
+    }
+
+    fn bulk_view(&self) -> Element<'_, Message> {
+        let n = self.bulk_selected.len();
+        let running = self.bulk_results.iter().any(|(_, r)| r.is_none());
+        let mut col = column![
+            row![
+                text(format!("Run a command on {n} selected computer(s)")).size(16),
+                Space::new().width(Length::Fill),
+                button(text("Clear").size(12))
+                    .style(button::subtle)
+                    .on_press_maybe((!running).then_some(Message::BulkSelectAll(false))),
+            ]
+            .align_y(Alignment::Center),
+            text("Runs as each agent's own account. Every agent checks your operator rights itself; computers where you are not an operator report \"Not authorized\".")
+                .size(12)
+                .style(text::secondary),
+            row![
+                pick_list(SHELLS, Some(ShellChoice(self.bulk_shell)), Message::BulkShell).text_size(13),
+                text("Timeout (s)").size(13),
+                text_input("120", &self.bulk_timeout)
+                    .on_input(Message::BulkTimeout)
+                    .padding(6)
+                    .width(70),
+                Space::new().width(Length::Fill),
+                button(text(format!("Run on {n}")))
+                    .style(button::primary)
+                    .on_press_maybe((n > 0 && !running).then_some(Message::BulkAsk)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            text_editor(&self.bulk_script)
+                .placeholder("Get-Service Spooler | Select-Object Status")
+                .on_action(Message::BulkEdit)
+                .font(iced::Font::MONOSPACE)
+                .height(120),
+        ]
+        .spacing(8);
+        if self.bulk_confirm {
+            col = col.push(
+                container(
+                    column![
+                        text(format!(
+                            "Run this {} script on {n} computer(s) with each agent's privileges?",
+                            ShellChoice(self.bulk_shell)
+                        )),
+                        row![
+                            button(text(format!("Run on {n} computers")))
+                                .style(button::danger)
+                                .on_press(Message::BulkConfirm),
+                            button(text("Cancel"))
+                                .style(button::secondary)
+                                .on_press(Message::BulkCancel),
+                        ]
+                        .spacing(8),
+                    ]
+                    .spacing(8),
+                )
+                .padding(10)
+                .width(Length::Fill)
+                .style(container::bordered_box),
+            );
+        }
+        if let Some(note) = &self.bulk_notice {
+            col = col.push(match note {
+                Ok(m) => text(m.clone()).size(13).style(text::success),
+                Err(e) => text(e.clone()).size(13).style(text::danger),
+            });
+        }
+        if self.bulk_results.is_empty() {
+            return col.into();
+        }
+        let (mut ok, mut failed, mut pending) = (0, 0, 0);
+        let rows = self.bulk_results.iter().map(|(addr, r)| {
+            let (status, detail, style): (String, String, fn(&Theme) -> text::Style) = match r {
+                None => ("running…".into(), String::new(), text::secondary),
+                Some(Err(e)) => ("failed".into(), e.clone(), text::danger),
+                Some(Ok(s)) => {
+                    let first = s
+                        .stdout
+                        .lines()
+                        .chain(s.stderr.lines())
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("")
+                        .to_owned();
+                    match (s.state, s.exit_code) {
+                        (ExecState::Exited, Some(0)) => ("exit 0".into(), first, text::success),
+                        (ExecState::Exited, Some(c)) => (format!("exit {c}"), first, text::danger),
+                        (state, _) => (format!("{state:?}").to_lowercase(), first, text::danger),
+                    }
+                }
+            };
+            match r {
+                None => pending += 1,
+                Some(Ok(s)) if s.state == ExecState::Exited && s.exit_code == Some(0) => ok += 1,
+                Some(_) => failed += 1,
+            }
+            row![
+                text(addr).size(13).width(Length::FillPortion(2)),
+                text(status)
+                    .size(13)
+                    .style(style)
+                    .width(Length::FillPortion(1)),
+                text(detail.chars().take(160).collect::<String>())
+                    .size(12)
+                    .font(iced::Font::MONOSPACE)
+                    .width(Length::FillPortion(4)),
+            ]
+            .spacing(6)
+            .into()
+        });
+        let rows: Vec<Element<_>> = rows.collect();
+        col.push(
+            row![
+                text(format!(
+                    "{ok} succeeded · {failed} failed · {pending} running"
+                ))
+                .size(13),
+                Space::new().width(Length::Fill),
+                button(text("Export CSV"))
+                    .style(button::secondary)
+                    .on_press_maybe((pending == 0).then_some(Message::BulkExport)),
+            ]
+            .align_y(Alignment::Center),
+        )
+        .push(scrollable(column(rows).spacing(3)).height(Length::Fill))
+        .into()
     }
 
     fn term_view(&self) -> Element<'_, Message> {
@@ -3833,6 +4100,52 @@ fn save_reg_file(label: &str, text: &str) -> Result<String, String> {
     bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
     std::fs::write(&path, bytes).map_err(|e| format!("Export failed: {e}"))?;
     Ok(format!("Exported to {}", path.display()))
+}
+
+/// Writes bulk-run results (one row per computer, full output) as CSV into `dir`.
+fn export_bulk_csv(
+    dir: &std::path::Path,
+    results: &[(String, Option<Result<ExecStatus, String>>)],
+) -> Result<String, String> {
+    // Leading = + - @ would make spreadsheets evaluate the cell (CSV injection).
+    let quote = |s: &str| {
+        let s = if s.starts_with(['=', '+', '-', '@']) {
+            format!("'{s}")
+        } else {
+            s.to_owned()
+        };
+        format!("\"{}\"", s.replace('"', "\"\""))
+    };
+    let mut csv = String::from("endpoint,state,exit_code,stdout,stderr,error\r\n");
+    for (addr, r) in results {
+        let (state, code, out, err, error) = match r {
+            None => ("running".to_string(), String::new(), "", "", String::new()),
+            Some(Err(e)) => ("failed".into(), String::new(), "", "", e.clone()),
+            Some(Ok(s)) => (
+                format!("{:?}", s.state).to_lowercase(),
+                s.exit_code.map(|c| c.to_string()).unwrap_or_default(),
+                s.stdout.as_str(),
+                s.stderr.as_str(),
+                s.error.clone().unwrap_or_default(),
+            ),
+        };
+        csv.push_str(&format!(
+            "{},{},{},{},{},{}\r\n",
+            quote(addr),
+            state,
+            code,
+            quote(out),
+            quote(err),
+            quote(&error)
+        ));
+    }
+    let path = dir.join(format!("tervano-bulk-{}.csv", now_millis()));
+    std::fs::write(&path, csv).map_err(|e| format!("Export failed: {e}"))?;
+    Ok(format!(
+        "Exported {} results to {}",
+        results.len(),
+        path.display()
+    ))
 }
 
 fn downloads_dir() -> Option<std::path::PathBuf> {
