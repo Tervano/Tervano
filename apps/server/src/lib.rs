@@ -852,6 +852,25 @@ async fn write_projections(
         .bind(id)
         .execute(&mut **tx)
         .await?;
+    // Keep the substring index (migration 0008) in step with the projections it is built from.
+    sqlx::query("DELETE FROM device_search WHERE device_id = ?")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    let mut body = state.hostname.clone();
+    for u in &state.sessions {
+        body.push(' ');
+        body.push_str(&u.username);
+    }
+    for a in &state.addresses {
+        body.push(' ');
+        body.push_str(&a.address);
+    }
+    sqlx::query("INSERT INTO device_search (device_id, body) VALUES (?, ?)")
+        .bind(id)
+        .bind(body)
+        .execute(&mut **tx)
+        .await?;
     for a in &state.addresses {
         sqlx::query(
             "INSERT INTO device_addresses (device_id, interface, address) VALUES (?, ?, ?)",
@@ -989,19 +1008,36 @@ async fn search_devices(
     let q = p.q.trim();
     // `DOMAIN\user` → search on the user part.
     let q = q.rsplit_once('\\').map_or(q, |(_, user)| user);
-    let pattern = like_prefix(q);
-    let rows = sqlx::query(
-        "SELECT id, hostname, os, last_seen, state_json FROM devices d
-         WHERE revoked = 0 AND (
-            hostname LIKE ?1 ESCAPE '\\'
-            OR EXISTS (SELECT 1 FROM device_sessions s WHERE s.device_id = d.id AND s.username LIKE ?1 ESCAPE '\\')
-            OR EXISTS (SELECT 1 FROM device_addresses a WHERE a.device_id = d.id AND a.address LIKE ?1 ESCAPE '\\'))
-         ORDER BY hostname COLLATE NOCASE LIMIT ?2",
-    )
-    .bind(&pattern)
-    .bind(p.limit.clamp(1, 1000) as i64)
-    .fetch_all(&s.db)
-    .await?;
+    let limit = p.limit.clamp(1, 1000) as i64;
+    let rows = if q.chars().count() >= 3 {
+        // Substring match via the trigram index. The input becomes one quoted FTS phrase, so FTS
+        // query syntax typed by a technician is never interpreted.
+        let phrase = format!("\"{}\"", q.replace('"', "\"\""));
+        sqlx::query(
+            "SELECT id, hostname, os, last_seen, state_json FROM devices d
+             WHERE revoked = 0
+               AND id IN (SELECT device_id FROM device_search WHERE device_search MATCH ?1)
+             ORDER BY hostname COLLATE NOCASE LIMIT ?2",
+        )
+        .bind(phrase)
+        .bind(limit)
+        .fetch_all(&s.db)
+        .await?
+    } else {
+        let pattern = like_prefix(q);
+        sqlx::query(
+            "SELECT id, hostname, os, last_seen, state_json FROM devices d
+             WHERE revoked = 0 AND (
+                hostname LIKE ?1 ESCAPE '\\'
+                OR EXISTS (SELECT 1 FROM device_sessions s WHERE s.device_id = d.id AND s.username LIKE ?1 ESCAPE '\\')
+                OR EXISTS (SELECT 1 FROM device_addresses a WHERE a.device_id = d.id AND a.address LIKE ?1 ESCAPE '\\'))
+             ORDER BY hostname COLLATE NOCASE LIMIT ?2",
+        )
+        .bind(&pattern)
+        .bind(limit)
+        .fetch_all(&s.db)
+        .await?
+    };
     let cutoff = now_millis() - s.offline_after_ms;
     let out = rows
         .into_iter()

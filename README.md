@@ -41,7 +41,7 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Server | Technician API tokens | Partial | Win/Linux | New tokens expire after 30 days by default; `tech rotate` replaces the old token and `tech revoke` disables it. CLI management only; RBAC and direct-channel certificate lifecycle remain separate work |
 | Agent | Report hostname, OS, IPs, signed-in users | Implemented | Windows | Verified on Windows 11 Home 25H2 (build 26200), workgroup machine. Not yet tested domain-joined |
 | Agent | Change detection | Partial | Windows | Poll-and-diff every `poll_secs`; event-driven notifications are T-209/T-210 |
-| Server | Device index + search | Implemented | Win/Linux | Prefix search by hostname, username, `DOMAIN\user`, IP. Tests: [api.rs](apps/server/tests/api.rs). Not yet benchmarked (T-112) |
+| Server | Device index + search | Implemented | Win/Linux | Substring (3+ characters, trigram index) or prefix search by hostname, username, `DOMAIN\user`, IP; P95 at most 87 ms with 10,000 devices in a local test (T-112). Tests: [api.rs](apps/server/tests/api.rs) |
 | Server | Device decommission | Implemented | Win/Linux | `tervano-server device list` / `device revoke --id`; audited |
 | Agent | Resource use | Measured | Windows | Idle release build: ~30 MB working set, ~9 MB private, ≈0.01% of one core (T-214) |
 | Server | Online/offline tracking | Implemented | Win/Linux | Heartbeat timeout + immediate offline on agent shutdown |
