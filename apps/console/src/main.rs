@@ -246,6 +246,7 @@ enum Message {
     Job(jobs::JobMsg),
     Group(groups::GroupMsg),
     MeLoaded(Result<TechnicianInfo, String>),
+    TicketLoaded(String, Result<TicketResponse, String>),
     Report(reports::ReportMsg),
     Compliance(compliance::ComplianceMsg),
 }
@@ -727,6 +728,8 @@ struct Console {
     groups: groups::GroupsState,
     /// The signed-in server technician's role and scope (`GET /api/v1/me`).
     me: Option<Result<TechnicianInfo, String>>,
+    /// Server connection tickets per direct endpoint address: (ticket, expires_at).
+    tickets: std::collections::HashMap<String, (String, Millis)>,
     reports: reports::ReportsState,
     compliance: compliance::ComplianceState,
 }
@@ -840,6 +843,7 @@ impl Console {
             jobs: jobs::JobsState::new(),
             groups: groups::GroupsState::new(),
             me: None,
+            tickets: Default::default(),
             reports: reports::ReportsState::new(),
             compliance: compliance::ComplianceState::new(),
         };
@@ -927,6 +931,12 @@ impl Console {
             address: ep.address.clone(),
             pin: ep.fingerprint.clone(),
             creds: self.creds(),
+            // A ticket about to expire is left out; the next endpoint check fetches a new one.
+            ticket: self
+                .tickets
+                .get(&ep.address)
+                .filter(|(_, expires)| *expires > now_millis() + 60_000)
+                .map(|(t, _)| t.clone()),
         })
     }
 
@@ -934,12 +944,40 @@ impl Console {
     /// Checks every direct endpoint once, so the list shows which agents answer without the
     /// technician having to open each one.
     fn check_endpoints(&self) -> Task<Message> {
-        Task::batch(self.settings.endpoints.iter().filter_map(|e| {
+        let checks = Task::batch(self.settings.endpoints.iter().filter_map(|e| {
             let t = self.target(&e.address)?;
             let addr = t.address.clone();
             Some(Task::perform(direct::device(t), move |r| {
                 Message::DirectLoaded(addr.clone(), r)
             }))
+        }));
+        Task::batch([checks, self.refresh_tickets()])
+    }
+
+    /// When signed in to a Server, gets a connection ticket for each direct endpoint that has no
+    /// fresh one. Agents that require tickets refuse requests until it arrives; others ignore it.
+    fn refresh_tickets(&self) -> Task<Message> {
+        if self.settings.token.is_empty() {
+            return Task::none();
+        }
+        Task::batch(self.settings.endpoints.iter().filter_map(|e| {
+            if self.target(&e.address)?.ticket.is_some() {
+                return None;
+            }
+            let mut t = self.target(&e.address)?;
+            t.ticket = None;
+            let api = self.client();
+            let addr = e.address.clone();
+            Some(Task::perform(
+                async move {
+                    let id = direct::identity(t)
+                        .await?
+                        .device_id
+                        .ok_or("the agent is not enrolled with a Tervano Server")?;
+                    api?.ticket(id).await
+                },
+                move |r| Message::TicketLoaded(addr.clone(), r),
+            ))
         }))
     }
 
@@ -1032,6 +1070,24 @@ impl Console {
             Message::Job(m) => return self.jobs_update(m),
             Message::Group(m) => return self.groups_update(m),
             Message::MeLoaded(r) => self.me = Some(r),
+            Message::TicketLoaded(addr, r) => match r {
+                Ok(t) => {
+                    tracing::info!(endpoint = %addr, level = ?t.level, "connection ticket received");
+                    self.tickets.insert(addr.clone(), (t.ticket, t.expires_at));
+                    // Re-check with the ticket; reload the open endpoint's current tab too.
+                    if self.direct_selected.as_deref() == Some(addr.as_str()) {
+                        return self.load_direct(&addr);
+                    }
+                    if let Some(t) = self.target(&addr) {
+                        return Task::perform(direct::device(t), move |r| {
+                            Message::DirectLoaded(addr.clone(), r)
+                        });
+                    }
+                }
+                // Expected for agents not enrolled or Servers without tickets; access may still
+                // come from the agent's own lists.
+                Err(e) => tracing::debug!(endpoint = %addr, "no connection ticket: {e}"),
+            },
             Message::Report(m) => return self.reports_update(m),
             Message::Compliance(m) => return self.compliance_update(m),
             Message::QueryChanged(q) => self.query = q,

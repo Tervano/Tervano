@@ -18,6 +18,7 @@ mod service;
 mod services;
 mod software;
 mod terminal;
+mod tickets;
 mod wmiq;
 
 use anyhow::Context;
@@ -84,6 +85,10 @@ impl Config {
         }
         if let Some(d) = &cfg.direct {
             d.validate()?;
+            anyhow::ensure!(
+                d.ticket_key.is_none() || cfg.server_url.is_some(),
+                "direct.ticket_key needs server_url: tickets are bound to the Server's device id"
+            );
         }
         cfg.server_jobs.validate()?;
         anyhow::ensure!(

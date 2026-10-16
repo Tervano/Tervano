@@ -6,6 +6,7 @@ mod facts;
 mod groups;
 mod rbac;
 mod reports;
+pub mod tickets;
 
 pub use rbac::set_technician_access;
 mod jobs;
@@ -48,6 +49,11 @@ pub struct Config {
     /// PEM certificate chain and private key. Required unless `listen` is loopback.
     pub tls_cert: Option<std::path::PathBuf>,
     pub tls_key: Option<std::path::PathBuf>,
+    /// Ed25519 key that signs connection tickets (created on first start). Relative paths are
+    /// resolved against the working directory, like the database.
+    pub ticket_key: std::path::PathBuf,
+    /// Lifetime of a connection ticket: how long direct access survives a Server outage.
+    pub ticket_minutes: u32,
 }
 
 impl Default for Config {
@@ -63,6 +69,8 @@ impl Default for Config {
             audit_archive_dir: None,
             tls_cert: None,
             tls_key: None,
+            ticket_key: "ticket-key.pk8".into(),
+            ticket_minutes: 480,
         }
     }
 }
@@ -84,6 +92,13 @@ impl Config {
         anyhow::ensure!(
             self.offline_after_secs >= 10,
             "offline_after_secs must be >= 10"
+        );
+        anyhow::ensure!(
+            (tickets::MIN_TICKET_MINUTES..=tickets::MAX_TICKET_MINUTES)
+                .contains(&self.ticket_minutes),
+            "ticket_minutes must be {}-{}",
+            tickets::MIN_TICKET_MINUTES,
+            tickets::MAX_TICKET_MINUTES
         );
         anyhow::ensure!(
             self.event_retention_days >= 1,
@@ -119,6 +134,8 @@ pub struct AppState {
     accepted_events: Arc<AtomicU64>,
     started_at_seconds: i64,
     limits: Arc<RequestLimits>,
+    /// `None`: tickets are not offered (503).
+    tickets: Option<Arc<tickets::TicketSigner>>,
 }
 
 const MAX_API_BODY: usize = 256 * 1024;
@@ -233,7 +250,14 @@ impl AppState {
                 requests_per_second,
                 enrollments_per_minute,
             )),
+            tickets: None,
         }
+    }
+
+    /// Enables connection tickets (T-403).
+    pub fn with_tickets(mut self, signer: tickets::TicketSigner) -> Self {
+        self.tickets = Some(Arc::new(signer));
+        self
     }
 
     fn publish(&self, id: &str) {
@@ -538,6 +562,7 @@ pub fn app(state: AppState) -> Router {
             post(ingest_inventory).layer(axum::extract::DefaultBodyLimit::max(MAX_INVENTORY_BODY)),
         )
         .route("/devices/{id}/inventory", get(device_inventory))
+        .route("/devices/{id}/ticket", post(tickets::issue))
         .route("/devices", get(search_devices))
         .route("/devices/{id}", get(device_details))
         .route("/devices/{id}/events", get(device_events))

@@ -20,6 +20,11 @@ heartbeat_secs = 60
 # technician_ca = 'C:\ProgramData\Tervano\Agent\ca.pem'
 # allowed_technicians = ["alice", "bob"]   # read-only access; empty or omitted = any certificate from technician_ca
 # operators = ["alice"]                      # may change the machine (terminate processes); empty = nobody
+# Tervano Server connection tickets (needs server_url): Consoles signed in to the Server get short-lived,
+# signed grants by the Server's roles and scopes; checked here offline, so they keep working through a
+# Server outage until they expire. Key from `tervano-server ticket public-key`.
+# ticket_key = "<64 hex digits>"
+# require_ticket = true   # only tickets grant access; the two lists above no longer do on their own
 
 # Server jobs: scripts technicians queue on the server for many devices. They run as this agent's
 # account (LocalSystem for the service), so they are off unless enabled here, and only the listed

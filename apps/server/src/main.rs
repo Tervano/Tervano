@@ -71,6 +71,18 @@ enum Cmd {
         #[command(subcommand)]
         cmd: CertCmd,
     },
+    /// Connection tickets for direct agent access (T-403).
+    Ticket {
+        #[command(subcommand)]
+        cmd: TicketCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum TicketCmd {
+    /// Print the ticket public key (creating the signing key if needed) for agents'
+    /// `[direct] ticket_key`.
+    PublicKey,
 }
 
 #[derive(Subcommand)]
@@ -245,6 +257,14 @@ async fn main() -> anyhow::Result<()> {
         _ => {}
     }
     let cfg = load_config(&cli.config)?;
+    if let Cmd::Ticket {
+        cmd: TicketCmd::PublicKey,
+    } = &cli.cmd
+    {
+        let key = tervano_server::tickets::load_or_create_key(&cfg.ticket_key)?;
+        println!("{}", tervano_server::tickets::public_key_hex(&key));
+        return Ok(());
+    }
     let db = connect(&cfg.database_url).await?;
 
     match cli.cmd {
@@ -261,6 +281,16 @@ async fn main() -> anyhow::Result<()> {
                 cfg.requests_per_second,
                 cfg.enrollments_per_minute,
             );
+            let key = tervano_server::tickets::load_or_create_key(&cfg.ticket_key)?;
+            tracing::info!(
+                "connection tickets: {} min, public key {}",
+                cfg.ticket_minutes,
+                tervano_server::tickets::public_key_hex(&key)
+            );
+            let state = state.with_tickets(tervano_server::tickets::TicketSigner::new(
+                key,
+                cfg.ticket_minutes,
+            ));
             spawn_offline_sweeper(state.clone());
             spawn_query_group_refresher(state.db.clone());
             spawn_event_purger(state.db.clone(), cfg.event_retention_days);
@@ -404,7 +434,7 @@ async fn main() -> anyhow::Result<()> {
             let (files, rows) = verify_archives(&dir)?;
             println!("verified {files} audit files and {rows} rows");
         }
-        Cmd::Cert { .. } => unreachable!("handled above"),
+        Cmd::Cert { .. } | Cmd::Ticket { .. } => unreachable!("handled above"),
     }
     Ok(())
 }

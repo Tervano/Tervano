@@ -107,6 +107,15 @@ impl Client {
         self.get(req).await
     }
 
+    /// A connection ticket for direct access to `device` (T-403).
+    pub async fn ticket(&self, device: uuid::Uuid) -> Result<TicketResponse, String> {
+        self.get(
+            self.http
+                .post(format!("{}/api/v1/devices/{device}/ticket", self.base)),
+        )
+        .await
+    }
+
     pub async fn me(&self) -> Result<TechnicianInfo, String> {
         self.get(self.http.get(format!("{}/api/v1/me", self.base)))
             .await

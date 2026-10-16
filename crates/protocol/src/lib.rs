@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.22";
+pub const PROTOCOL_VERSION: &str = "1.23";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -792,6 +792,50 @@ pub struct ComplianceResult {
     pub status: ComplianceStatus,
     /// What was found, e.g. the installed version or the free space.
     pub detail: String,
+}
+
+/// Request header carrying a server-issued connection ticket on direct agent requests (T-403).
+pub const TICKET_HEADER: &str = "x-tervano-ticket";
+
+/// What a connection ticket allows on the direct channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketLevel {
+    /// Read-only operations.
+    Read,
+    /// Also operations that change the machine.
+    Operate,
+}
+
+/// The signed part of a connection ticket. The Server signs these exact JSON bytes with its
+/// Ed25519 ticket key; agents verify them offline with the public key from their configuration,
+/// so tickets keep working until they expire even while the Server is down (PLAN §2).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TicketClaims {
+    /// Format version, currently 1.
+    pub v: u8,
+    /// The Server's id for the device the ticket is for (the agent checks it is its own).
+    pub device_id: Uuid,
+    /// Must equal the CN of the client certificate presenting the ticket.
+    pub technician: String,
+    pub level: TicketLevel,
+    pub issued_at: Millis,
+    pub expires_at: Millis,
+}
+
+/// `POST /api/v1/devices/{id}/ticket`. `ticket` is `hex(claims JSON) "." hex(signature)`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TicketResponse {
+    pub ticket: String,
+    pub level: TicketLevel,
+    pub expires_at: Millis,
+}
+
+/// `GET /v1/identity` on a direct agent: its Server device id, `None` until it has enrolled.
+/// Needs only the technician certificate, so a Console can ask for a ticket before anything else.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DirectIdentity {
+    pub device_id: Option<Uuid>,
 }
 
 /// Server technician role (T-806); each includes the ones before it.

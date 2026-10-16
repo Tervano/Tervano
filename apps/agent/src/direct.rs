@@ -5,6 +5,7 @@
 //! certificate, which consoles pin by SHA-256 fingerprint (`TervanoAgent direct-fingerprint`).
 //! Authorization is checked here, per operation, never just in the Console (PLAN §12.9).
 
+use crate::tickets::TicketVerifier;
 use crate::{
     collect, eventlog, exec::Jobs, files, inventory, peripherals, processes::Processes, registry,
     secure, services, software, terminal::Terminals, wmiq,
@@ -41,6 +42,13 @@ pub struct DirectConfig {
     /// changing operations are never granted implicitly.
     #[serde(default)]
     pub operators: Vec<String>,
+    /// Tervano Server ticket public key (`tervano-server ticket public-key`). Set to accept
+    /// Server-issued connection tickets, which grant access by the Server's roles and scopes.
+    #[serde(default)]
+    pub ticket_key: Option<String>,
+    /// Only tickets grant access; the lists above no longer do on their own.
+    #[serde(default)]
+    pub require_ticket: bool,
 }
 
 impl DirectConfig {
@@ -53,6 +61,11 @@ impl DirectConfig {
             "direct.technician_ca {} not found",
             self.technician_ca.display()
         );
+        anyhow::ensure!(
+            !self.require_ticket || self.ticket_key.is_some(),
+            "direct.require_ticket needs direct.ticket_key"
+        );
+        crate::tickets::TicketVerifier::new(self.ticket_key.as_deref(), PathBuf::new())?;
         Ok(())
     }
 }
@@ -124,9 +137,10 @@ impl Op {
     }
 }
 
-/// The authenticated technician, from the verified client certificate.
+/// The authenticated technician (client certificate CN) and what a valid Server ticket on this
+/// request grants, if one came with it.
 #[derive(Debug, Clone)]
-struct Technician(Arc<str>);
+struct Technician(Arc<str>, Option<TicketLevel>);
 
 type ApiResult<T> = Result<T, (StatusCode, Json<ApiError>)>;
 
@@ -150,15 +164,31 @@ fn check_protocol(headers: &HeaderMap) -> ApiResult<()> {
 }
 
 /// Per-operation authorization: read-only ops follow `allowed_technicians`, changing ops require
-/// `operators`. Every request is logged with its decision (local audit trail).
-// shortcut: two fixed roles; configurable per-op roles arrive with RBAC (T-806).
+/// `operators`; a valid Server ticket grants its level as well (or, with `require_ticket`, alone).
+/// Every request is logged with its decision (local audit trail).
 fn authorize(cfg: &DirectConfig, tech: &Technician, op: Op) -> ApiResult<()> {
     let listed = |list: &[String]| list.iter().any(|t| **t == *tech.0);
-    let ok = if op.needs_operator() {
+    let by_config = if op.needs_operator() {
         listed(&cfg.operators)
     } else {
         cfg.allowed_technicians.is_empty() || listed(&cfg.allowed_technicians)
     };
+    let by_ticket = match tech.1 {
+        Some(TicketLevel::Operate) => true,
+        Some(TicketLevel::Read) => !op.needs_operator(),
+        None => false,
+    };
+    let ok = by_ticket || (by_config && !cfg.require_ticket);
+    if !ok && cfg.require_ticket && tech.1.is_none() {
+        tracing::info!(technician = %tech.0, op = op.name(), allowed = false, "direct request without the required ticket");
+        return Err(api_err(
+            StatusCode::FORBIDDEN,
+            format!(
+                "this computer requires a Tervano Server ticket for {}; use a Console signed in to the Server",
+                op.name()
+            ),
+        ));
+    }
     // Status polls arrive every second while a command runs; keep them out of the info log.
     if matches!(op, Op::CommandStatus) && ok {
         tracing::debug!(technician = %tech.0, op = op.name(), allowed = ok, "direct request");
@@ -268,7 +298,10 @@ where
                         "client certificate has no CN",
                     )
                 })?;
-            Ok((stream, Extension(Technician(name.into())).layer(service)))
+            Ok((
+                stream,
+                Extension(Technician(name.into(), None)).layer(service),
+            ))
         })
     }
 }
@@ -284,6 +317,54 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// Applies a Server ticket sent with the request to the technician, or refuses the request when
+/// a ticket was sent but does not check out (never silently downgraded to the config lists).
+async fn apply_ticket(
+    Extension(verifier): Extension<Arc<TicketVerifier>>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Some(ticket) = req
+        .headers()
+        .get(TICKET_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+    else {
+        return next.run(req).await;
+    };
+    let Some(tech) = req.extensions_mut().get_mut::<Technician>() else {
+        return api_err(StatusCode::FORBIDDEN, "no technician").into_response();
+    };
+    let checked = {
+        let (verifier, name, ticket) = (verifier.clone(), tech.0.clone(), ticket.clone());
+        tokio::task::spawn_blocking(move || verifier.verify(&ticket, &name)).await
+    };
+    match checked {
+        Ok(Ok(level)) => {
+            tech.1 = Some(level);
+            next.run(req).await
+        }
+        Ok(Err(why)) => {
+            tracing::warn!(technician = %tech.0, "ticket rejected: {why}");
+            api_err(StatusCode::FORBIDDEN, format!("ticket rejected: {why}")).into_response()
+        }
+        Err(e) => api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// `GET /v1/identity`: this agent's Server device id, so a Console can request a ticket. Needs
+/// only the technician certificate (the id is not secret).
+async fn identity(
+    Extension(verifier): Extension<Arc<TicketVerifier>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<DirectIdentity>> {
+    check_protocol(&headers)?;
+    Ok(Json(DirectIdentity {
+        device_id: verifier.device_id(),
+    }))
 }
 
 async fn device_info(
@@ -858,7 +939,15 @@ pub async fn serve(
     let addr: std::net::SocketAddr = cfg.listen.parse()?;
     let tls =
         axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls_config(&cfg, &state_dir)?));
+    let verifier = TicketVerifier::new(cfg.ticket_key.as_deref(), state_dir.clone())?;
+    if cfg.ticket_key.is_some() {
+        tracing::info!(
+            required = cfg.require_ticket,
+            "direct management accepts Tervano Server tickets"
+        );
+    }
     let app = Router::new()
+        .route("/v1/identity", get(identity))
         .route("/v1/device", get(device_info))
         .route("/v1/processes", get(list_processes))
         .route("/v1/processes/{pid}/kill", post(kill_process))
@@ -902,6 +991,8 @@ pub async fn serve(
             "/v1/services/{name}/start-type",
             post(set_service_start_type),
         )
+        .layer(axum::middleware::from_fn(apply_ticket))
+        .layer(Extension(Arc::new(verifier)))
         .layer(Extension(Arc::new(cfg)))
         .layer(Extension(Arc::new(Processes::new())))
         .layer(Extension(Arc::new(Jobs::new(state_dir.clone()))))

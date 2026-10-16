@@ -22,6 +22,7 @@ hex = "0.4"
 getrandom = "0.3"
 clap = { version = "4", features = ["derive"] }
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "crypto"] }
 tokio-stream = { version = "0.1.17", features = ["sync"] }

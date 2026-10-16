@@ -44,6 +44,8 @@ reconnects with its configured token, so replace that setting after rotation.
 
 ## Direct Agent channel
 
+Agents with `[direct] ticket_key` also accept a Server connection ticket in the `x-tervano-ticket` header: `hex(claims JSON).hex(Ed25519 signature)`, issued by `POST /api/v1/devices/{id}/ticket` within the technician's role and scope. The agent checks it offline (signature, certificate CN, its own device id from `GET /v1/identity`, expiry) and grants read or operate; an invalid ticket is refused rather than ignored. `require_ticket = true` makes tickets the only grant.
+
 The direct listener is HTTPS with mandatory client certificates from the
 Agent's configured technician CA. The Console checks a pinned Agent
 fingerprint before sending application requests. The current routes are

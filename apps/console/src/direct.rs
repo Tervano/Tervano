@@ -174,6 +174,8 @@ pub struct Target {
     pub address: String,
     pub pin: String,
     pub creds: Creds,
+    /// Server-issued connection ticket for this agent (T-403), sent with every request.
+    pub ticket: Option<String>,
 }
 
 /// Sends one request to a pinned agent and turns transport/HTTP failures into readable text.
@@ -184,26 +186,27 @@ async fn send(
     let v = verifier(Some(t.pin.clone()));
     let c = client(&t.creds, v.clone())?;
     let address = &t.address;
-    let res = build(&c, format!("https://{address}"))
-        .send()
-        .await
-        .map_err(|e| {
-            match v.seen.lock().expect("not poisoned").as_deref() {
-                Some(seen) if seen != t.pin => format!(
-                    "Certificate changed! {address} now presents {} but {} is pinned. This can mean \
+    let mut request = build(&c, format!("https://{address}"));
+    if let Some(ticket) = &t.ticket {
+        request = request.header(TICKET_HEADER, ticket);
+    }
+    let res = request.send().await.map_err(|e| {
+        match v.seen.lock().expect("not poisoned").as_deref() {
+            Some(seen) if seen != t.pin => format!(
+                "Certificate changed! {address} now presents {} but {} is pinned. This can mean \
                      interception, or that the agent was reinstalled. Verify with \
                      `TervanoAgent direct-fingerprint` on the endpoint before re-adding it.",
-                    display_fingerprint(seen),
-                    display_fingerprint(&t.pin)
-                ),
-                // Handshake passed our check, so a failure now is the agent refusing us or the network.
-                Some(_) => format!(
-                    "The agent at {address} refused the connection. Is your technician certificate \
+                display_fingerprint(seen),
+                display_fingerprint(&t.pin)
+            ),
+            // Handshake passed our check, so a failure now is the agent refusing us or the network.
+            Some(_) => format!(
+                "The agent at {address} refused the connection. Is your technician certificate \
                      issued by the CA it trusts? ({e})"
-                ),
-                None => format!("Cannot reach agent at {address}: {e}"),
-            }
-        })?;
+            ),
+            None => format!("Cannot reach agent at {address}: {e}"),
+        }
+    })?;
     let status = res.status();
     if status.is_success() {
         return Ok(res);
@@ -224,6 +227,11 @@ async fn json<T: serde::de::DeserializeOwned>(res: reqwest::Response) -> Result<
     res.json()
         .await
         .map_err(|e| format!("Unexpected agent response: {e}"))
+}
+
+/// The agent's Server device id (to request a ticket); needs only the technician certificate.
+pub async fn identity(t: Target) -> Result<DirectIdentity, String> {
+    json(send(&t, |c, base| c.get(format!("{base}/v1/identity"))).await?).await
 }
 
 /// Reads live device state from the agent, refusing anything but the pinned certificate.

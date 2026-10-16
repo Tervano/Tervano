@@ -14,3 +14,7 @@ enrollments_per_minute = 60
 # creates a private CA and these files; or use a certificate from your own PKI.
 # tls_cert = 'tls/server.pem'
 # tls_key = 'tls/server-key.pem'
+# Connection tickets for direct agent access: signing key (created on first start; protect it like a
+# TLS key) and lifetime, i.e. how long granted direct access survives a Server outage (5-1440 min).
+# ticket_key = 'ticket-key.pk8'
+# ticket_minutes = 480
