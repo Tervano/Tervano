@@ -1,6 +1,7 @@
 //! Tervano Server library: HTTP API + persistence. `main.rs` is the CLI around it.
 
 pub mod audit_archive;
+mod compliance;
 mod groups;
 mod rbac;
 mod reports;
@@ -520,6 +521,12 @@ pub fn app(state: AppState) -> Router {
         .route("/devices/{id}/events", get(device_events))
         .route("/audit", get(list_audit))
         .route("/me", get(rbac::me))
+        .route(
+            "/compliance",
+            get(compliance::list).post(compliance::create),
+        )
+        .route("/compliance/{id}", delete(compliance::delete_check))
+        .route("/compliance/{id}/results", get(compliance::results))
         .route("/reports/software", get(reports::software))
         .route("/reports/software/devices", get(reports::software_devices))
         .route("/reports/os", get(reports::os))

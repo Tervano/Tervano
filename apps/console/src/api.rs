@@ -148,6 +148,43 @@ impl Client {
         .await
     }
 
+    pub async fn compliance_checks(&self) -> Result<Vec<ComplianceCheck>, String> {
+        self.get(self.http.get(format!("{}/api/v1/compliance", self.base)))
+            .await
+    }
+
+    pub async fn compliance_results(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<Vec<ComplianceResult>, String> {
+        self.get(
+            self.http
+                .get(format!("{}/api/v1/compliance/{id}/results", self.base)),
+        )
+        .await
+    }
+
+    pub async fn create_compliance(
+        &self,
+        c: &ComplianceCheckCreate,
+    ) -> Result<ComplianceCheck, String> {
+        self.get(
+            self.http
+                .post(format!("{}/api/v1/compliance", self.base))
+                .json(c),
+        )
+        .await
+    }
+
+    pub async fn delete_compliance(&self, id: uuid::Uuid) -> Result<(), String> {
+        self.send(
+            self.http
+                .delete(format!("{}/api/v1/compliance/{id}", self.base)),
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub async fn groups(&self) -> Result<Vec<DeviceGroup>, String> {
         self.get(self.http.get(format!("{}/api/v1/groups", self.base)))
             .await

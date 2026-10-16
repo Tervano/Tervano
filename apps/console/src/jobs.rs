@@ -260,6 +260,31 @@ impl Console {
         Task::none()
     }
 
+    /// Opens the new-job form filled in (e.g. a compliance remediation) for the technician to
+    /// review and confirm; nothing is queued until they do.
+    pub(crate) fn jobs_prefill(
+        &mut self,
+        name: String,
+        shell: Shell,
+        script: &str,
+        devices: BTreeMap<Uuid, String>,
+    ) -> Task<Message> {
+        let j = &mut self.jobs;
+        j.name = name.chars().take(120).collect();
+        j.shell = shell;
+        j.script = text_editor::Content::with_text(script);
+        j.selected = devices;
+        j.delay.clear();
+        j.confirm = false;
+        j.form = true;
+        j.notice = Some(Ok(format!(
+            "Prepared for {} device(s). Review the script, then queue it.",
+            j.selected.len()
+        )));
+        self.page = crate::Page::Jobs;
+        self.jobs_refresh()
+    }
+
     fn job_request(&self) -> Result<JobCreate, String> {
         let j = &self.jobs;
         if j.selected.is_empty() {

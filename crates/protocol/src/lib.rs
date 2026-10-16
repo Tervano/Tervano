@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.20";
+pub const PROTOCOL_VERSION: &str = "1.21";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -711,6 +711,87 @@ pub struct HardwareReportRow {
     pub tpm_version: Option<String>,
     pub secure_boot: Option<bool>,
     pub reboot_pending: bool,
+}
+
+/// What a compliance check requires of a device (T-805), judged from its latest inventory.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ComplianceRule {
+    /// An installed app whose name contains `name` (case-insensitive), optionally at least
+    /// `min_version` (dotted numbers compared numerically).
+    SoftwarePresent {
+        name: String,
+        #[serde(default)]
+        min_version: Option<String>,
+    },
+    /// No installed app whose name contains `name`.
+    SoftwareAbsent {
+        name: String,
+    },
+    NoRebootPending,
+    SecureBootOn,
+    TpmPresent,
+    /// The system drive (C:) has at least this much free space.
+    DiskFreeAtLeast {
+        gib: u32,
+    },
+    /// OS build at least this (e.g. `26100` or `26100.4061`).
+    OsBuildAtLeast {
+        build: String,
+    },
+    /// The inventory was collected within this many days.
+    InventoryNewerThan {
+        days: u32,
+    },
+}
+
+/// Body of `POST /api/v1/compliance`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceCheckCreate {
+    pub name: String,
+    pub rule: ComplianceRule,
+    /// Script the Console offers to queue as a job for failing devices.
+    #[serde(default)]
+    pub remediation: Option<Remediation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Remediation {
+    pub shell: Shell,
+    pub script: String,
+}
+
+/// `GET /api/v1/compliance`: a check with its current counts over the caller's devices.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceCheck {
+    pub id: Uuid,
+    pub name: String,
+    pub rule: ComplianceRule,
+    pub remediation: Option<Remediation>,
+    pub created_by: String,
+    pub created_at: Millis,
+    pub passing: u32,
+    pub failing: u32,
+    /// Devices without an inventory yet.
+    pub unknown: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComplianceStatus {
+    Pass,
+    Fail,
+    Unknown,
+}
+
+/// One device in `GET /api/v1/compliance/{id}/results` (failing first).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplianceResult {
+    pub device_id: Uuid,
+    pub hostname: String,
+    pub status: ComplianceStatus,
+    /// What was found, e.g. the installed version or the free space.
+    pub detail: String,
 }
 
 /// Server technician role (T-806); each includes the ones before it.

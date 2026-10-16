@@ -16,6 +16,7 @@ the minor version; breaking ones bump the major version.
 | `POST /api/v1/events` | Device bearer secret | Applies sequenced Agent events; replayed sequence numbers are skipped |
 | `GET /api/v1/devices`, `GET /api/v1/devices/{id}` | Technician bearer token | Search (`q`, optional `group` to search within a device group) and current details |
 | `GET /api/v1/reports/software`, `/reports/software/devices`, `/reports/os`, `/reports/hardware` | Technician bearer token | Fleet reports from stored state and inventory, limited to the caller's device scope |
+| `GET /api/v1/compliance`, `POST /api/v1/compliance`, `DELETE /api/v1/compliance/{id}`, `GET /api/v1/compliance/{id}/results` | Technician bearer token | Compliance checks evaluated over the caller's devices; writes need operator without a scope |
 | `GET /api/v1/me` | Technician bearer token | Name, role, device scope and token expiry of the caller |
 | `GET /api/v1/groups`, `POST /api/v1/groups`, `DELETE /api/v1/groups/{id}`, `POST /api/v1/groups/{id}/members` | Technician bearer token | Device groups: static (member list) or query (saved search evaluated on read) |
 | `GET /api/v1/devices/{id}/events` | Technician bearer token | Newest-first retained event history, up to 100 rows per page |

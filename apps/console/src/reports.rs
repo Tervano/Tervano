@@ -14,12 +14,13 @@ pub enum ReportTab {
     Software,
     Os,
     Hardware,
+    Compliance,
 }
 
 /// (name, version) of a software entry.
 type SoftwareKey = (String, Option<String>);
 /// Not loaded yet, failed, or rows.
-type Loaded<T> = Option<Result<Vec<T>, String>>;
+pub(crate) type Loaded<T> = Option<Result<Vec<T>, String>>;
 
 pub struct ReportsState {
     tab: ReportTab,
@@ -88,6 +89,7 @@ impl Console {
                     Message::Report(ReportMsg::Hardware(x))
                 })
             }
+            ReportTab::Compliance => self.compliance_load(),
         }
     }
 
@@ -129,10 +131,15 @@ impl Console {
             }
             ReportMsg::ExportCsv | ReportMsg::ExportJson => {
                 let csv = matches!(msg, ReportMsg::ExportCsv);
-                r.notice = Some(match downloads_dir() {
-                    None => Err("No Downloads folder to export to.".into()),
-                    Some(dir) => export(&dir, r, csv),
-                });
+                let notice = if r.tab == ReportTab::Compliance {
+                    self.compliance_export(csv)
+                } else {
+                    match downloads_dir() {
+                        None => Err("No Downloads folder to export to.".into()),
+                        Some(dir) => export(&dir, r, csv),
+                    }
+                };
+                self.reports.notice = Some(notice);
             }
         }
         Task::none()
@@ -156,6 +163,7 @@ impl Console {
             tab("Software", ReportTab::Software),
             tab("Operating systems", ReportTab::Os),
             tab("Hardware", ReportTab::Hardware),
+            tab("Compliance", ReportTab::Compliance),
             Space::new().width(Length::Fill),
         ]
         .spacing(6)
@@ -200,6 +208,7 @@ impl Console {
         }
         let body: Element<_> = match r.tab {
             ReportTab::Software => self.software_view(),
+            ReportTab::Compliance => self.compliance_view(),
             ReportTab::Os => match &r.os {
                 None => centered("Loading…"),
                 Some(Err(e)) => error_box(e),
@@ -346,7 +355,7 @@ fn hardware_cells(h: &HardwareReportRow) -> Vec<String> {
 }
 
 /// A simple text table; rows are clickable when `on_row` is given.
-fn table<'a>(
+pub(crate) fn table<'a>(
     headers: &[&'static str],
     widths: &[u16],
     rows: impl Iterator<Item = Vec<String>>,
@@ -397,6 +406,7 @@ fn table<'a>(
 /// Writes the current tab's report to `dir` as CSV or JSON.
 fn export(dir: &std::path::Path, r: &ReportsState, csv: bool) -> Result<String, String> {
     let (name, json, table): (&str, String, Vec<Vec<String>>) = match r.tab {
+        ReportTab::Compliance => unreachable!("exported by the compliance tab"),
         ReportTab::Software => {
             let rows = loaded(&r.software)?;
             (

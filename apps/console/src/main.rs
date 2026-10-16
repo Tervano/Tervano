@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod api;
+mod compliance;
 mod creds;
 mod direct;
 mod groups;
@@ -246,6 +247,7 @@ enum Message {
     Group(groups::GroupMsg),
     MeLoaded(Result<TechnicianInfo, String>),
     Report(reports::ReportMsg),
+    Compliance(compliance::ComplianceMsg),
 }
 
 /// How many endpoints a bulk run works on at once.
@@ -726,6 +728,7 @@ struct Console {
     /// The signed-in server technician's role and scope (`GET /api/v1/me`).
     me: Option<Result<TechnicianInfo, String>>,
     reports: reports::ReportsState,
+    compliance: compliance::ComplianceState,
 }
 
 impl Console {
@@ -838,6 +841,7 @@ impl Console {
             groups: groups::GroupsState::new(),
             me: None,
             reports: reports::ReportsState::new(),
+            compliance: compliance::ComplianceState::new(),
         };
         let task = if configured {
             Task::batch([c.search(), c.load_groups(), c.load_me()])
@@ -1009,6 +1013,7 @@ impl Console {
             Message::Group(m) => return self.groups_update(m),
             Message::MeLoaded(r) => self.me = Some(r),
             Message::Report(m) => return self.reports_update(m),
+            Message::Compliance(m) => return self.compliance_update(m),
             Message::QueryChanged(q) => self.query = q,
             Message::Search => return self.search(),
             Message::Refresh => {
