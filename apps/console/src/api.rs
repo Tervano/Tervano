@@ -126,6 +126,33 @@ impl Client {
         self.get(self.http.get(format!("{}/api/v1/devices/{id}", self.base)))
             .await
     }
+
+    pub async fn create_job(&self, job: &JobCreate) -> Result<JobSummary, String> {
+        self.get(
+            self.http
+                .post(format!("{}/api/v1/jobs", self.base))
+                .json(job),
+        )
+        .await
+    }
+
+    pub async fn jobs(&self) -> Result<Vec<JobSummary>, String> {
+        self.get(self.http.get(format!("{}/api/v1/jobs", self.base)))
+            .await
+    }
+
+    pub async fn job(&self, id: uuid::Uuid) -> Result<JobDetail, String> {
+        self.get(self.http.get(format!("{}/api/v1/jobs/{id}", self.base)))
+            .await
+    }
+
+    pub async fn cancel_job(&self, id: uuid::Uuid) -> Result<JobSummary, String> {
+        self.get(
+            self.http
+                .post(format!("{}/api/v1/jobs/{id}/cancel", self.base)),
+        )
+        .await
+    }
 }
 
 #[derive(Debug, Clone)]

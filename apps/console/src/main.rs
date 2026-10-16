@@ -4,6 +4,7 @@
 mod api;
 mod creds;
 mod direct;
+mod jobs;
 
 use iced::widget::{
     Space, button, checkbox, column, container, pick_list, progress_bar, row, rule, scrollable,
@@ -97,6 +98,7 @@ impl Settings {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Page {
     Devices,
+    Jobs,
     Direct,
     Settings,
 }
@@ -237,6 +239,7 @@ enum Message {
     BulkCancel,
     BulkDone(String, Result<ExecStatus, String>),
     BulkExport,
+    Job(jobs::JobMsg),
 }
 
 /// How many endpoints a bulk run works on at once.
@@ -712,6 +715,7 @@ struct Console {
     /// Per endpoint: `None` while running.
     bulk_results: Vec<(String, Option<Result<ExecStatus, String>>)>,
     bulk_notice: Option<Result<String, String>>,
+    jobs: jobs::JobsState,
 }
 
 impl Console {
@@ -820,6 +824,7 @@ impl Console {
             bulk_confirm: false,
             bulk_results: Vec::new(),
             bulk_notice: None,
+            jobs: jobs::JobsState::new(),
         };
         let task = if configured { c.search() } else { Task::none() };
         (c, task)
@@ -951,7 +956,13 @@ impl Console {
 
     fn update(&mut self, msg: Message) -> Task<Message> {
         match msg {
-            Message::Nav(p) => self.page = p,
+            Message::Nav(p) => {
+                self.page = p;
+                if p == Page::Jobs && !self.settings.token.is_empty() {
+                    return self.jobs_refresh();
+                }
+            }
+            Message::Job(m) => return self.jobs_update(m),
             Message::QueryChanged(q) => self.query = q,
             Message::Search => return self.search(),
             Message::Refresh => {
@@ -1817,6 +1828,12 @@ impl Console {
             Subscription::run_with(key, api::live).map(Message::Live),
             direct_tick,
         ];
+        if self.page == Page::Jobs && self.jobs.live() {
+            subs.push(
+                iced::time::every(Duration::from_secs(3))
+                    .map(|_| Message::Job(jobs::JobMsg::Refresh)),
+            );
+        }
         if self.dirty {
             // Debounce: a burst of pushed changes becomes one refresh.
             // shortcut: re-runs the whole current search per burst; patch rows in place if this gets heavy (T-307).
@@ -1854,6 +1871,7 @@ impl Console {
                 text("Console").size(12).style(text::secondary),
                 Space::new().height(16),
                 nav("Devices", Page::Devices),
+                nav("Jobs", Page::Jobs),
                 nav("Direct", Page::Direct),
                 nav("Settings", Page::Settings),
                 Space::new().height(Length::Fill),
@@ -1878,6 +1896,7 @@ impl Console {
 
         let main: Element<_> = match self.page {
             Page::Devices => self.devices_view(),
+            Page::Jobs => self.jobs_view(),
             Page::Direct => self.direct_view(),
             Page::Settings => self.settings_view(),
         };
@@ -1918,7 +1937,7 @@ impl Console {
             }),
             Ok(devices) => {
                 let header = row![
-                    text("").width(14),
+                    text("").width(14 + 28),
                     text("Name").width(Length::FillPortion(3)),
                     text("User").width(Length::FillPortion(2)),
                     text("IP address").width(Length::FillPortion(2)),
@@ -1930,7 +1949,12 @@ impl Console {
                 // shortcut: renders every row (server caps at 100); virtualization is T-307.
                 let rows = devices.iter().map(|d| {
                     let selected = self.selected == Some(d.id);
-                    button(
+                    let (id, host) = (d.id, d.hostname.clone());
+                    let pick =
+                        checkbox(self.jobs.selected.contains_key(&d.id)).on_toggle(move |on| {
+                            Message::Job(jobs::JobMsg::Toggle(id, host.clone(), on))
+                        });
+                    let line = button(
                         row![
                             status_dot(d.online),
                             text(&d.hostname).width(Length::FillPortion(3)),
@@ -1950,10 +1974,14 @@ impl Console {
                     } else {
                         button::text
                     })
-                    .on_press(Message::Select(d.id))
-                    .into()
+                    .on_press(Message::Select(d.id));
+                    row![pick, line]
+                        .spacing(6)
+                        .align_y(Alignment::Center)
+                        .into()
                 });
                 column![
+                    self.jobs_selection_bar(),
                     container(header.width(Length::Fill)).style(container::rounded_box),
                     scrollable(column(rows).spacing(2)).height(Length::Fill),
                     text(format!(
@@ -4107,15 +4135,7 @@ fn export_bulk_csv(
     dir: &std::path::Path,
     results: &[(String, Option<Result<ExecStatus, String>>)],
 ) -> Result<String, String> {
-    // Leading = + - @ would make spreadsheets evaluate the cell (CSV injection).
-    let quote = |s: &str| {
-        let s = if s.starts_with(['=', '+', '-', '@']) {
-            format!("'{s}")
-        } else {
-            s.to_owned()
-        };
-        format!("\"{}\"", s.replace('"', "\"\""))
-    };
+    let quote = csv_cell;
     let mut csv = String::from("endpoint,state,exit_code,stdout,stderr,error\r\n");
     for (addr, r) in results {
         let (state, code, out, err, error) = match r {
@@ -4146,6 +4166,16 @@ fn export_bulk_csv(
         results.len(),
         path.display()
     ))
+}
+
+/// A quoted CSV cell. A leading = + - @ would make spreadsheets evaluate it (CSV injection).
+fn csv_cell(s: &str) -> String {
+    let s = if s.starts_with(['=', '+', '-', '@']) {
+        format!("'{s}")
+    } else {
+        s.to_owned()
+    };
+    format!("\"{}\"", s.replace('"', "\"\""))
 }
 
 fn downloads_dir() -> Option<std::path::PathBuf> {

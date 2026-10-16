@@ -12,6 +12,7 @@ mod processes;
 mod reg;
 mod registry;
 mod secure;
+mod serverjobs;
 #[cfg(windows)]
 mod service;
 mod services;
@@ -49,6 +50,9 @@ pub struct Config {
     /// Direct management listener. Omit to disable.
     #[serde(default)]
     pub direct: Option<direct::DirectConfig>,
+    /// Scripts queued on the server (T-800). Off unless enabled here.
+    #[serde(default)]
+    pub server_jobs: serverjobs::ServerJobsConfig,
 }
 
 fn default_poll() -> u64 {
@@ -81,6 +85,11 @@ impl Config {
         if let Some(d) = &cfg.direct {
             d.validate()?;
         }
+        cfg.server_jobs.validate()?;
+        anyhow::ensure!(
+            !cfg.server_jobs.enabled || cfg.server_url.is_some(),
+            "[server_jobs] needs server_url"
+        );
         anyhow::ensure!(
             cfg.server_url.is_some() || cfg.direct.is_some(),
             "nothing to do: set server_url and/or a [direct] section"
@@ -155,6 +164,7 @@ impl Identity {
     }
 }
 
+#[derive(Clone)]
 struct Client {
     http: reqwest::Client,
     base: String,
@@ -212,6 +222,32 @@ impl Client {
             .post(format!("{}/api/v1/inventory", self.base))
             .bearer_auth(secret)
             .json(report)
+            .send()
+            .await?;
+        check(res).await.map(|_| ())
+    }
+
+    /// The next server job for this device, if any.
+    async fn claim_job(&self, secret: &str) -> anyhow::Result<Option<AgentJob>> {
+        let res = self
+            .http
+            .post(format!("{}/api/v1/agent/jobs/claim", self.base))
+            .bearer_auth(secret)
+            .send()
+            .await?;
+        let res = check(res).await?;
+        if res.status() == reqwest::StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        Ok(Some(res.json().await?))
+    }
+
+    async fn job_result(&self, secret: &str, id: uuid::Uuid, r: &JobResult) -> anyhow::Result<()> {
+        let res = self
+            .http
+            .post(format!("{}/api/v1/agent/jobs/{id}/result", self.base))
+            .bearer_auth(secret)
+            .json(r)
             .send()
             .await?;
         check(res).await.map(|_| ())
@@ -353,6 +389,20 @@ async fn report(
         }
     };
     tracing::info!(device = %identity.device_id, server = %server_url, "reporting to server");
+    // Enabled: picked up within a poll; disabled: claimed (and refused) once per heartbeat.
+    let job_poll = if cfg.server_jobs.enabled {
+        poll
+    } else {
+        Duration::from_secs(cfg.heartbeat_secs)
+    };
+    tokio::spawn(serverjobs::run(
+        client.clone(),
+        identity.device_secret.clone(),
+        cfg.server_jobs.clone(),
+        exec::Jobs::new(cfg.state_dir.clone()),
+        job_poll,
+        stop.clone(),
+    ));
 
     // Seeded from the clock so a restarted agent never reuses a seq; corrected from the server's ack.
     let mut seq = now_millis() as u64;

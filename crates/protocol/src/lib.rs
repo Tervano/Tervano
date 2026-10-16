@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.15";
+pub const PROTOCOL_VERSION: &str = "1.16";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -662,6 +662,104 @@ pub struct TerminalOutput {
 pub struct TerminalSince {
     #[serde(default)]
     pub since: u64,
+}
+
+/// Most devices one server job may target.
+pub const JOB_MAX_TARGETS: usize = 1000;
+/// Each output stream of a job result is cut to this many bytes before upload.
+pub const JOB_OUTPUT_CAP: usize = 64 * 1024;
+
+/// Body of `POST /api/v1/jobs`: run a script on server-managed devices (T-800). Agents run it only
+/// if they opted in to server jobs and allow the creating technician.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobCreate {
+    pub name: String,
+    pub shell: Shell,
+    pub script: String,
+    /// Default 300, max 3600.
+    pub timeout_secs: Option<u32>,
+    pub devices: Vec<Uuid>,
+}
+
+/// Where one device is in a job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobTargetState {
+    /// Waiting for the device to pick it up.
+    Pending,
+    Running,
+    Exited,
+    TimedOut,
+    Cancelled,
+    /// Could not run: refused by the device's policy, failed to start, or no result came back.
+    Failed,
+}
+
+/// One job in `GET /api/v1/jobs`, with per-state target counts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub created_by: String,
+    pub created_at: Millis,
+    pub shell: Shell,
+    pub script_sha256: String,
+    pub timeout_secs: u32,
+    pub cancelled: bool,
+    pub targets: u32,
+    pub pending: u32,
+    pub running: u32,
+    /// Exited with code 0.
+    pub succeeded: u32,
+    /// Finished any other way.
+    pub failed: u32,
+}
+
+/// One device's progress and output in a job.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobTarget {
+    pub device_id: Uuid,
+    pub hostname: String,
+    pub state: JobTargetState,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub truncated: bool,
+    pub error: Option<String>,
+    pub started_at: Option<Millis>,
+    pub finished_at: Option<Millis>,
+}
+
+/// `GET /api/v1/jobs/{id}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobDetail {
+    pub summary: JobSummary,
+    pub script: String,
+    pub targets: Vec<JobTarget>,
+}
+
+/// `POST /api/v1/agent/jobs/claim` (device auth): the next job for this device, or 204.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentJob {
+    pub id: Uuid,
+    /// Technician who created the job; the agent checks it against its own allow-list.
+    pub created_by: String,
+    pub shell: Shell,
+    pub script: String,
+    pub timeout_secs: u32,
+}
+
+/// Body of `POST /api/v1/agent/jobs/{id}/result`. `state` is never `running`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobResult {
+    pub state: ExecState,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub truncated: bool,
+    pub error: Option<String>,
+    pub started_at: Millis,
+    pub finished_at: Millis,
 }
 
 /// SSE event names on `GET /api/v1/stream`.

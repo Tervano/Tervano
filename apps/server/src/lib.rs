@@ -1,6 +1,7 @@
 //! Tervano Server library: HTTP API + persistence. `main.rs` is the CLI around it.
 
 pub mod audit_archive;
+mod jobs;
 
 use axum::{
     Extension, Json, Router,
@@ -117,6 +118,19 @@ const MAX_API_BODY: usize = 256 * 1024;
 /// Software inventories run ~240 bytes per app; this covers several thousand apps.
 const MAX_INVENTORY_BODY: usize = 2 * 1024 * 1024;
 const INVENTORY_PATH: &str = "/api/v1/inventory";
+/// Two 64 KiB output streams can triple in size as escaped JSON.
+const MAX_JOB_RESULT_BODY: usize = 1024 * 1024;
+
+/// Largest body admitted for `path`; matches the per-route `DefaultBodyLimit`s in [`app`].
+fn body_limit(path: &str) -> usize {
+    if path == INVENTORY_PATH {
+        MAX_INVENTORY_BODY
+    } else if path.starts_with("/api/v1/agent/jobs/") && path.ends_with("/result") {
+        MAX_JOB_RESULT_BODY
+    } else {
+        MAX_API_BODY
+    }
+}
 const MAX_IN_FLIGHT: usize = 128;
 const MAX_STREAMS: usize = 256;
 const MAX_RATE_PEERS: usize = 65_536;
@@ -500,6 +514,14 @@ pub fn app(state: AppState) -> Router {
         .route("/devices/{id}", get(device_details))
         .route("/devices/{id}/events", get(device_events))
         .route("/audit", get(list_audit))
+        .route("/jobs", post(jobs::create_job).get(jobs::list_jobs))
+        .route("/jobs/{id}", get(jobs::get_job))
+        .route("/jobs/{id}/cancel", post(jobs::cancel_job))
+        .route("/agent/jobs/claim", post(jobs::claim_job))
+        .route(
+            "/agent/jobs/{id}/result",
+            post(jobs::job_result).layer(axum::extract::DefaultBodyLimit::max(MAX_JOB_RESULT_BODY)),
+        )
         .route("/stream", get(stream_changes))
         .layer(middleware::from_fn(require_protocol))
         // State JSON is small; this bounds memory per request.
@@ -519,14 +541,7 @@ async fn admit_request(State(s): State<AppState>, req: Request, next: Next) -> R
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<usize>().ok())
-        .is_some_and(|length| {
-            let limit = if req.uri().path() == INVENTORY_PATH {
-                MAX_INVENTORY_BODY
-            } else {
-                MAX_API_BODY
-            };
-            length > limit
-        })
+        .is_some_and(|length| length > body_limit(req.uri().path()))
     {
         return err(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
     }

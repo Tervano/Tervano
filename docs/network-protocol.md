@@ -18,9 +18,11 @@ the minor version; breaking ones bump the major version.
 | `GET /api/v1/devices/{id}/events` | Technician bearer token | Newest-first retained event history, up to 100 rows per page |
 | `GET /api/v1/audit` | Technician bearer token | Paginated audit records |
 | `GET /api/v1/stream` | Technician bearer token | SSE `device` notifications and `resync` on lag |
+| `POST /api/v1/jobs`, `GET /api/v1/jobs`, `GET /api/v1/jobs/{id}`, `POST /api/v1/jobs/{id}/cancel` | Technician bearer token | Queue a script for 1–1000 devices, list jobs, per-device results, cancel targets not yet picked up |
+| `POST /api/v1/agent/jobs/claim`, `POST /api/v1/agent/jobs/{id}/result` | Device bearer secret | Next pending job for this device (204 if none); its result (body up to 1 MiB, each output stream cut to 64 KiB) |
 | `GET /metrics` | Technician bearer token | Aggregate Prometheus text; no protocol header |
 
-Server `/api/v1` request bodies are capped at 256 KiB. Event batches are capped
+Server `/api/v1` request bodies are capped at 256 KiB (inventory 2 MiB, job results 1 MiB). Agents run server jobs only if their `[server_jobs]` section allows the creating technician; the Server stores the script to hand it out and audits it by SHA-256. Event batches are capped
 at 500; accepted events must have increasing `seq` values per device. The
 Server returns the highest applied sequence in `EventAck`. Agent timestamps are
 not trusted for retention: history uses Server receipt time. The metrics event
