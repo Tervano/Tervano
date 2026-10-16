@@ -1173,6 +1173,15 @@ impl Console {
                     if self.cmd_job.as_ref().is_some_and(|(a, _)| a != &address) {
                         self.cmd_job = None;
                     }
+                    // A finished terminal's scrollback belongs to its endpoint; an open one stays
+                    // open (term_view points back to it) rather than being killed silently.
+                    if self.term_exited.is_some() {
+                        self.term = None;
+                        self.term_text.clear();
+                        self.term_next = 0;
+                        self.term_exited = None;
+                        self.term_notice = None;
+                    }
                 }
                 self.direct_selected = Some(address.clone());
                 return self.load_direct(&address);
@@ -1682,6 +1691,8 @@ impl Console {
                     && let Some(t) = self.target(addr)
                 {
                     let text = format!("{}\r\n", self.term_input);
+                    // The shell does not echo piped input; show what was sent in the scrollback.
+                    self.term_text.push_str(&format!("> {}\n", self.term_input));
                     self.term_input.clear();
                     return Task::perform(direct::terminal_input(t, *id, text), Message::TermSent);
                 }
@@ -2023,12 +2034,14 @@ impl Console {
                 "No devices match this search."
             }),
             Ok(devices) => {
+                // With the details panel open the columns get narrow and addresses can't wrap.
+                let compact = self.selected.is_some();
                 let header = row![
                     text("").width(14 + 28),
                     text("Name").width(Length::FillPortion(3)),
                     text("User").width(Length::FillPortion(2)),
                     text("IP address").width(Length::FillPortion(2)),
-                    text("OS").width(Length::FillPortion(3)),
+                    (!compact).then(|| text("OS").width(Length::FillPortion(3))),
                     text("Last seen").width(Length::FillPortion(2)),
                 ]
                 .spacing(8)
@@ -2047,8 +2060,9 @@ impl Console {
                             text(&d.hostname).width(Length::FillPortion(3)),
                             text(d.users.join(", ")).width(Length::FillPortion(2)),
                             text(d.primary_ip.as_deref().unwrap_or("—"))
+                                .wrapping(text::Wrapping::WordOrGlyph)
                                 .width(Length::FillPortion(2)),
-                            text(&d.os).width(Length::FillPortion(3)),
+                            (!compact).then(|| text(&d.os).width(Length::FillPortion(3))),
                             text(ago(d.last_seen)).width(Length::FillPortion(2)),
                         ]
                         .spacing(8)
@@ -2057,7 +2071,7 @@ impl Console {
                     .padding([8, 10])
                     .width(Length::Fill)
                     .style(if selected {
-                        button::secondary
+                        crate::selected_row
                     } else {
                         button::text
                     })
@@ -2070,7 +2084,7 @@ impl Console {
                 column![
                     self.jobs_selection_bar(),
                     container(header.width(Length::Fill)).style(container::rounded_box),
-                    scrollable(column(rows).spacing(2)).height(Length::Fill),
+                    scroll(column(rows).spacing(2)).height(Length::Fill),
                     text(format!(
                         "{} device(s) · {}{}",
                         devices.len(),
@@ -2244,10 +2258,16 @@ impl Console {
                 "No agents yet. Add one by address; you'll confirm its certificate fingerprint before anything is exchanged.",
             )
         } else {
+            // Matches the (1, 3) split below: the list is narrow while a tab other than Summary is open.
+            let compact = self.direct_selected.is_some() && self.direct_tab != DirectTab::Summary;
             let rows = self.settings.endpoints.iter().map(|e| {
                 let result = self.direct_results.get(&e.address);
                 let (online, label) = match result {
                     Some(Ok(s)) => (true, s.hostname.clone()),
+                    // A pin mismatch is a security event, not an outage; say so in the list too.
+                    Some(Err(e)) if e.starts_with("Certificate changed") => {
+                        (false, "certificate changed!".into())
+                    }
                     Some(Err(_)) => (false, "unreachable or refused".into()),
                     None => (false, "not checked yet".into()),
                 };
@@ -2256,7 +2276,17 @@ impl Console {
                 row![
                     checkbox(self.bulk_selected.contains(&e.address))
                         .on_toggle(move |on| Message::BulkToggle(addr.clone(), on)),
-                    button(
+                    button(if compact {
+                        row![
+                            status_dot(online),
+                            column![
+                                text(&e.address).size(13),
+                                text(label).size(11).style(text::secondary),
+                            ],
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center)
+                    } else {
                         row![
                             status_dot(online),
                             text(&e.address).width(Length::FillPortion(3)),
@@ -2269,12 +2299,12 @@ impl Console {
                             .width(Length::FillPortion(2)),
                         ]
                         .spacing(8)
-                        .align_y(Alignment::Center),
-                    )
+                        .align_y(Alignment::Center)
+                    })
                     .padding([8, 10])
                     .width(Length::Fill)
                     .style(if selected {
-                        button::secondary
+                        crate::selected_row
                     } else {
                         button::text
                     })
@@ -2294,7 +2324,7 @@ impl Console {
                 )
                 .label("Select all for a bulk run")
                 .on_toggle(Message::BulkSelectAll),
-                scrollable(column(rows).spacing(2)).height(Length::Fill),
+                scroll(column(rows).spacing(2)).height(Length::Fill),
             ]
             .spacing(6)
             .into()
@@ -2374,7 +2404,9 @@ impl Console {
                                 tab("WMI", DirectTab::Wmi),
                                 tab("Terminal", DirectTab::Terminal)
                             ]
-                            .spacing(6),
+                            .spacing(6)
+                            .wrap()
+                            .vertical_spacing(6),
                             body
                         ]
                         .spacing(10)
@@ -2524,11 +2556,27 @@ impl Console {
             ]
             .align_y(Alignment::Center),
         )
-        .push(scrollable(column(rows).spacing(3)).height(Length::Fill))
+        .push(scroll(column(rows).spacing(3)).height(Length::Fill))
         .into()
     }
 
     fn term_view(&self) -> Element<'_, Message> {
+        if let Some((addr, _)) = &self.term
+            && self.term_exited.is_none()
+            && self.direct_selected.as_deref() != Some(addr.as_str())
+        {
+            return column![
+                text(format!(
+                    "A terminal is open on {addr}. Close it there before opening one on this computer."
+                ))
+                .size(13),
+                button(text(format!("Go to {addr}")).size(13))
+                    .style(button::secondary)
+                    .on_press(Message::DirectSelect(addr.clone())),
+            ]
+            .spacing(8)
+            .into();
+        }
         let open = self.term.is_some() && self.term_exited.is_none();
         let controls = row![
             pick_list(
@@ -2567,7 +2615,7 @@ impl Console {
         }
         col.push(
             container(
-                scrollable(text(&self.term_text).size(12).font(iced::Font::MONOSPACE))
+                scroll(text(&self.term_text).size(12).font(iced::Font::MONOSPACE))
                     .anchor_bottom()
                     .height(Length::Fill)
                     .width(Length::Fill),
@@ -2636,7 +2684,7 @@ impl Console {
             .into()
         });
         col.push(container(header).style(container::rounded_box))
-            .push(scrollable(column(rows).spacing(3)).height(Length::Fill))
+            .push(scroll(column(rows).spacing(3)).height(Length::Fill))
             .push(
                 text(format!(
                     "{} installed updates (Windows' hotfix list; feature updates and Store apps are not included)",
@@ -2728,7 +2776,7 @@ impl Console {
                 .style(container::bordered_box)
                 .into()
         });
-        col.push(scrollable(column(cards).spacing(6)).height(Length::Fill))
+        col.push(scroll(column(cards).spacing(6)).height(Length::Fill))
             .push(
                 text(format!(
                     "{} instance(s){}",
@@ -2827,7 +2875,7 @@ impl Console {
                 .size(13),
             );
         }
-        scrollable(column![printers, rule::horizontal(1), drives].spacing(10)).into()
+        scroll(column![printers, rule::horizontal(1), drives].spacing(10)).into()
     }
 
     fn files_navigate(&mut self, path: String) -> Task<Message> {
@@ -3023,7 +3071,7 @@ impl Console {
             }
             r.into()
         });
-        col.push(scrollable(column(rows).spacing(2)).height(Length::Fill))
+        col.push(scroll(column(rows).spacing(2)).height(Length::Fill))
             .push(
                 text(format!(
                     "{} {}",
@@ -3140,7 +3188,7 @@ impl Console {
                 );
             }
             col = col.push(
-                container(scrollable(out).height(Length::Fill))
+                container(scroll(out).height(Length::Fill))
                     .padding(8)
                     .width(Length::Fill)
                     .style(container::bordered_box),
@@ -3243,19 +3291,19 @@ impl Console {
             let (ty, shown) = reg_display(&v.data);
             c.push(
                 row![
+                    // Names and data rarely have spaces; break inside them rather than overlap.
                     text(if v.name.is_empty() {
                         "(Default)"
                     } else {
                         &v.name
                     })
                     .size(13)
+                    .wrapping(text::Wrapping::WordOrGlyph)
                     .width(Length::FillPortion(3)),
-                    text(ty)
-                        .size(12)
-                        .style(text::secondary)
-                        .width(Length::FillPortion(2)),
+                    text(ty).size(12).style(text::secondary).width(110),
                     text(shown.chars().take(200).collect::<String>())
                         .size(13)
+                        .wrapping(text::Wrapping::WordOrGlyph)
                         .width(Length::FillPortion(5)),
                     button(text("Edit").size(12))
                         .style(button::subtle)
@@ -3308,7 +3356,7 @@ impl Console {
 
         col.push(
             row![
-                container(scrollable(subkeys).height(Length::Fill))
+                container(scroll(subkeys).height(Length::Fill))
                     .width(Length::FillPortion(1))
                     .style(container::bordered_box)
                     .padding(4),
@@ -3316,7 +3364,7 @@ impl Console {
                     text(format!("{} values", contents.values.len()))
                         .size(12)
                         .style(text::secondary),
-                    scrollable(values).height(Length::Fill),
+                    scroll(values).height(Length::Fill),
                     form,
                     key_actions,
                 ]
@@ -3432,8 +3480,9 @@ impl Console {
             text("Name").size(12).width(Length::FillPortion(4)),
             text("Version").size(12).width(Length::FillPortion(2)),
             text("Publisher").size(12).width(Length::FillPortion(3)),
-            text("Installed").size(12).width(Length::FillPortion(1)),
-            text("Size").size(12).width(Length::FillPortion(1)),
+            // Fixed widths: dates and sizes never wrap, so a share of a narrow panel overlaps.
+            text("Installed").size(12).width(80),
+            text("Size").size(12).width(64),
             text("Scope").size(12).width(Length::FillPortion(2)),
             Space::new().width(80),
         ]
@@ -3449,22 +3498,25 @@ impl Console {
                 }
             });
             row![
-                text(&a.name).size(13).width(Length::FillPortion(4)),
+                text(&a.name)
+                    .size(13)
+                    .wrapping(text::Wrapping::WordOrGlyph)
+                    .width(Length::FillPortion(4)),
                 text(a.version.as_deref().unwrap_or("—"))
                     .size(13)
+                    .wrapping(text::Wrapping::WordOrGlyph)
                     .width(Length::FillPortion(2)),
                 text(a.publisher.as_deref().unwrap_or("—"))
                     .size(13)
+                    .wrapping(text::Wrapping::WordOrGlyph)
                     .width(Length::FillPortion(3)),
-                text(date.unwrap_or_else(|| "—".into()))
-                    .size(12)
-                    .width(Length::FillPortion(1)),
+                text(date.unwrap_or_else(|| "—".into())).size(12).width(80),
                 text(a.size_bytes.map_or("—".into(), |b| format!(
                     "{:.0} MB",
                     b as f64 / 1_048_576.0
                 )))
                 .size(12)
-                .width(Length::FillPortion(1)),
+                .width(64),
                 text(a.scope.strip_prefix("machine-").unwrap_or(&a.scope))
                     .size(12)
                     .width(Length::FillPortion(2)),
@@ -3495,7 +3547,7 @@ impl Console {
                 .padding(8),
         )
         .push(container(header).style(container::rounded_box))
-        .push(scrollable(column(rows).spacing(3)).height(Length::Fill))
+        .push(scroll(column(rows).spacing(3)).height(Length::Fill))
         .push(
             text(format!(
                 "{} of {} applications",
@@ -3553,7 +3605,7 @@ impl Console {
                 }
             ),
         };
-        scrollable(
+        scroll(
             column![
                 section("System"),
                 kv("Manufacturer", opt(&hw.manufacturer)),
@@ -3753,7 +3805,7 @@ impl Console {
                 .spacing(2),
             )
             .style(if expanded {
-                button::secondary
+                crate::selected_row
             } else {
                 button::text
             })
@@ -3762,7 +3814,7 @@ impl Console {
             .on_press(Message::EvtToggle(e.record_id))
             .into()
         });
-        col.push(scrollable(column(rows).spacing(2)).height(Length::Fill))
+        col.push(scroll(column(rows).spacing(2)).height(Length::Fill))
             .push(
                 text(format!("{} events, newest first (max 200)", list.len()))
                     .size(12)
@@ -3909,7 +3961,7 @@ impl Console {
             });
         }
         col.push(container(header).style(container::rounded_box))
-            .push(scrollable(column(rows).spacing(4)).height(Length::Fill))
+            .push(scroll(column(rows).spacing(4)).height(Length::Fill))
             .push(
                 text(format!("{} of {} services", shown.len(), list.len()))
                     .size(12)
@@ -4034,7 +4086,7 @@ impl Console {
             });
         }
         col.push(container(header).style(container::rounded_box))
-            .push(scrollable(column(rows).spacing(2)).height(Length::Fill))
+            .push(scroll(column(rows).spacing(2)).height(Length::Fill))
             .push(
                 text(format!("{} of {} processes", shown.len(), list.len()))
                     .size(12)
@@ -4137,8 +4189,13 @@ fn state_panel<'a>(
     status: &'a str,
     extra: Vec<(&'a str, String)>,
 ) -> Element<'a, Message> {
-    let kv =
-        |k: &'a str, v: String| row![text(k).width(120).style(text::secondary), text(v)].spacing(8);
+    let kv = |k: &'a str, v: String| {
+        row![
+            text(k).width(120).style(text::secondary),
+            text(v).wrapping(text::Wrapping::WordOrGlyph)
+        ]
+        .spacing(8)
+    };
     let section = |title: &'a str| text(title).size(13).style(text::primary);
 
     let mut sessions = column![section("Active users")].spacing(4);
@@ -4186,7 +4243,7 @@ fn state_panel<'a>(
         summary = summary.push(kv(k, v));
     }
 
-    scrollable(
+    scroll(
         column![
             row![status_dot(online), text(&s.hostname).size(22)]
                 .spacing(8)
@@ -4324,6 +4381,33 @@ fn export_events_csv(
         list.len(),
         path.display()
     ))
+}
+
+/// A vertical scroll area whose scrollbar gets its own lane instead of covering the right edge
+/// (where row buttons such as "Terminate" sit).
+fn scroll<'a>(content: impl Into<Element<'a, Message>>) -> iced::widget::Scrollable<'a, Message> {
+    scrollable(content).spacing(4)
+}
+
+/// Selected list row: a light tint of the accent colour, so normal and secondary text stay readable.
+fn selected_row(theme: &Theme, status: button::Status) -> button::Style {
+    let p = theme.extended_palette();
+    let strength = match status {
+        button::Status::Hovered | button::Status::Pressed => 0.32,
+        _ => 0.22,
+    };
+    button::Style {
+        background: Some(
+            Color {
+                a: strength,
+                ..p.primary.base.color
+            }
+            .into(),
+        ),
+        text_color: p.background.base.text,
+        border: iced::border::rounded(4),
+        ..button::text(theme, status)
+    }
 }
 
 fn status_dot<'a>(online: bool) -> Element<'a, Message> {

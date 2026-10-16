@@ -4,10 +4,10 @@
 
 use crate::{
     Console, Message, SHELLS, ShellChoice, ago, centered, csv_cell, downloads_dir, error_box,
+    scroll,
 };
 use iced::widget::{
-    Space, button, checkbox, column, container, pick_list, row, rule, scrollable, text,
-    text_editor, text_input,
+    Space, button, checkbox, column, container, pick_list, row, rule, text, text_editor, text_input,
 };
 use iced::{Alignment, Element, Length, Task, Theme};
 use std::collections::BTreeMap;
@@ -143,14 +143,7 @@ impl Console {
                 let failed: BTreeMap<Uuid, String> = d
                     .targets
                     .iter()
-                    .filter(|t| {
-                        matches!(
-                            (t.state, t.exit_code),
-                            (JobTargetState::Exited, Some(c)) if c != 0
-                        ) || t.state == JobTargetState::TimedOut
-                            || (t.state == JobTargetState::Failed
-                                && target_status(t).0 != "refused")
-                    })
+                    .filter(|t| rerunnable(t))
                     .map(|t| (t.device_id, t.hostname.clone()))
                     .collect();
                 if failed.is_empty() {
@@ -275,6 +268,7 @@ impl Console {
         j.script = text_editor::Content::with_text(script);
         j.selected = devices;
         j.delay.clear();
+        j.parallel.clear();
         j.confirm = false;
         j.form = true;
         j.notice = Some(Ok(format!(
@@ -436,14 +430,14 @@ impl Console {
                     .width(Length::Fill)
                     .padding([6, 10])
                     .style(if open == Some(s.id) {
-                        button::secondary
+                        crate::selected_row
                     } else {
                         button::text
                     })
                     .on_press(Message::Job(JobMsg::Open(s.id)))
                     .into()
                 });
-                scrollable(column(rows.collect::<Vec<_>>()).spacing(2))
+                scroll(column(rows.collect::<Vec<_>>()).spacing(2))
                     .height(Length::Fill)
                     .into()
             }
@@ -590,8 +584,10 @@ impl Console {
                 button(text("Rerun failed").size(13))
                     .style(button::secondary)
                     .on_press_maybe(
-                        (finished(s) && s.failed > 0 && self.can(TechRole::Operator))
-                            .then_some(Message::Job(JobMsg::Rerun))
+                        (finished(s)
+                            && d.targets.iter().any(rerunnable)
+                            && self.can(TechRole::Operator))
+                        .then_some(Message::Job(JobMsg::Rerun))
                     ),
                 button(text("Cancel job").size(13))
                     .style(button::danger)
@@ -709,7 +705,7 @@ impl Console {
         });
         column![
             head,
-            scrollable(column(rows.collect::<Vec<Element<_>>>()).spacing(2)).height(Length::Fill)
+            scroll(column(rows.collect::<Vec<Element<_>>>()).spacing(2)).height(Length::Fill)
         ]
         .spacing(8)
         .into()
@@ -725,6 +721,13 @@ fn until(at: Millis) -> String {
         3600..86400 => format!("in {}h", s / 3600),
         _ => format!("in {}d", s / 86400),
     }
+}
+
+/// A real failure worth retrying; refused devices would refuse again.
+fn rerunnable(t: &JobTarget) -> bool {
+    matches!((t.state, t.exit_code), (JobTargetState::Exited, Some(c)) if c != 0)
+        || t.state == JobTargetState::TimedOut
+        || (t.state == JobTargetState::Failed && target_status(t).0 != "refused")
 }
 
 fn target_status(t: &JobTarget) -> (String, fn(&Theme) -> text::Style) {

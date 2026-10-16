@@ -2,9 +2,9 @@
 //! inventory, with drill-down from a software entry to its devices and CSV/JSON export.
 
 use crate::{
-    Console, Message, Page, ago, centered, csv_cell, downloads_dir, error_box, human_size,
+    Console, Message, Page, ago, centered, csv_cell, downloads_dir, error_box, human_size, scroll,
 };
-use iced::widget::{Space, button, column, container, row, rule, scrollable, text, text_input};
+use iced::widget::{Space, button, column, container, row, rule, text, text_input};
 use iced::{Alignment, Element, Length, Task};
 use tervano_protocol::*;
 use uuid::Uuid;
@@ -286,7 +286,7 @@ impl Console {
         let detail: Element<_> = match devices {
             None => centered("Loading…"),
             Some(Err(e)) => error_box(e),
-            Some(Ok(devs)) => scrollable(
+            Some(Ok(devs)) => scroll(
                 column(devs.iter().map(|d| {
                     button(
                         row![
@@ -381,7 +381,12 @@ pub(crate) fn table<'a>(
             let line = cells(
                 values
                     .into_iter()
-                    .map(|v| text(v).size(13).into())
+                    .map(|v| {
+                        text(v)
+                            .size(13)
+                            .wrapping(text::Wrapping::WordOrGlyph)
+                            .into()
+                    })
                     .collect(),
             );
             match &on_row {
@@ -397,7 +402,7 @@ pub(crate) fn table<'a>(
         .collect();
     column![
         container(header.padding([4, 6])).style(container::rounded_box),
-        scrollable(column(body).spacing(1)).height(Length::Fill),
+        scroll(column(body).spacing(1)).height(Length::Fill),
     ]
     .spacing(4)
     .into()

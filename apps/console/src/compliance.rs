@@ -3,10 +3,11 @@
 //! normal Jobs form and confirmation, so nothing runs from this tab directly.
 
 use crate::reports::{Loaded, table};
-use crate::{Console, Message, SHELLS, ShellChoice, centered, csv_cell, downloads_dir, error_box};
+use crate::{
+    Console, Message, SHELLS, ShellChoice, centered, csv_cell, downloads_dir, error_box, scroll,
+};
 use iced::widget::{
-    Space, button, checkbox, column, container, pick_list, row, rule, scrollable, text,
-    text_editor, text_input,
+    Space, button, checkbox, column, container, pick_list, row, rule, text, text_editor, text_input,
 };
 use iced::{Alignment, Element, Length, Task};
 use std::collections::BTreeMap;
@@ -381,7 +382,7 @@ impl Console {
             Some(Ok(l)) if l.is_empty() => centered("No compliance checks yet."),
             Some(Ok(l)) => {
                 let open = c.open.as_ref().map(|(id, _)| *id);
-                scrollable(
+                scroll(
                     column(l.iter().map(|k| {
                         button(
                             column![
@@ -409,7 +410,7 @@ impl Console {
                         .width(Length::Fill)
                         .padding([6, 10])
                         .style(if open == Some(k.id) {
-                            button::secondary
+                            crate::selected_row
                         } else {
                             button::text
                         })
