@@ -38,6 +38,7 @@ pub fn install(config: &std::path::Path) -> anyhow::Result<()> {
     svc.set_description(
         "Tervano endpoint management agent. Reports device state to Tervano Server.",
     )?;
+    register_event_source()?;
     println!("installed service {NAME} (config: {})", config.display());
     Ok(())
 }
@@ -52,8 +53,45 @@ pub fn uninstall() -> anyhow::Result<()> {
         let _ = svc.stop();
     }
     svc.delete()?;
+    // Best effort: the event source key is only cosmetic once the service is gone.
+    let _ = std::process::Command::new(system32("reg.exe"))
+        .args(["delete", EVENT_SOURCE_KEY, "/f"])
+        .output();
     println!("service {NAME} marked for deletion");
     Ok(())
+}
+
+const EVENT_SOURCE_KEY: &str =
+    r"HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\TervanoAgent";
+
+fn system32(exe: &str) -> PathBuf {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    PathBuf::from(root).join("System32").join(exe)
+}
+
+/// Registers the event source with EventCreate.exe as message file, whose message table renders
+/// any string we report verbatim, so Event Viewer shows our text instead of "description not found".
+fn register_event_source() -> anyhow::Result<()> {
+    use crate::reg::{HKEY_LOCAL_MACHINE, Key, View};
+    let key = Key::create(
+        HKEY_LOCAL_MACHINE,
+        &EVENT_SOURCE_KEY["HKLM\\".len()..],
+        View::Native,
+    )
+    .map_err(|e| anyhow::anyhow!("registering event source: {}", crate::reg::error_text(e)))?;
+    let wide = |s: &str| -> Vec<u8> {
+        s.encode_utf16()
+            .chain(std::iter::once(0))
+            .flat_map(u16::to_le_bytes)
+            .collect()
+    };
+    key.set_raw(
+        "EventMessageFile",
+        2,
+        &wide(r"%SystemRoot%\System32\EventCreate.exe"),
+    )
+    .and_then(|()| key.set_raw("TypesSupported", 4, &7u32.to_le_bytes()))
+    .map_err(|e| anyhow::anyhow!("registering event source: {}", crate::reg::error_text(e)))
 }
 
 pub fn run_as_service(config: PathBuf) -> anyhow::Result<()> {
@@ -66,6 +104,9 @@ define_windows_service!(ffi_service_main, service_main);
 
 fn service_main(_args: Vec<OsString>) {
     if let Err(e) = service_body() {
+        // The file logger may not exist yet (bad config, unwritable state dir), so always also
+        // record the failure where an administrator will look for it.
+        crate::logfile::event_log_error(&format!("Tervano Agent service failed: {e:#}"));
         tracing::error!("service failed: {e:#}");
     }
 }
@@ -74,11 +115,9 @@ fn service_body() -> anyhow::Result<()> {
     let cfg = crate::Config::load(CONFIG_PATH.get().expect("set before dispatch"))?;
     std::fs::create_dir_all(&cfg.state_dir)?;
     crate::secure::restrict_dir(&cfg.state_dir)?;
-    // shortcut: single unrotated log file; rotation/Event Log sink is T-216.
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(cfg.state_dir.join("agent.log"))?;
+    // At most 5 x 10 MiB of logs: agent.log plus agent.log.1 … agent.log.4.
+    let log =
+        crate::logfile::RotatingLog::open(cfg.state_dir.join("agent.log"), 10 * 1024 * 1024, 5)?;
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),

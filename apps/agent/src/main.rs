@@ -4,6 +4,7 @@ mod eventlog;
 mod exec;
 mod files;
 mod inventory;
+mod logfile;
 mod netwatch;
 mod peripherals;
 mod processes;

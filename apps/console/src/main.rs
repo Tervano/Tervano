@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod api;
+mod creds;
 mod direct;
 
 use iced::widget::{
@@ -31,7 +32,9 @@ fn main() -> iced::Result {
 #[serde(default)]
 struct Settings {
     server_url: String,
-    // shortcut: plaintext in the user's %APPDATA%; Credential Manager is T-306.
+    /// Lives in Windows Credential Manager, never in console.toml (only read from it once to
+    /// migrate older settings files).
+    #[cfg_attr(windows, serde(skip_serializing))]
     token: String,
     /// Optional PEM CA to trust for the server (e.g. `ca.pem` from `tervano-server cert init`).
     ca_cert: String,
@@ -62,16 +65,28 @@ impl Settings {
     }
 
     fn load() -> Self {
-        Self::path()
+        let mut s: Settings = Self::path()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| toml::from_str(&s).ok())
             .unwrap_or_else(|| Settings {
                 server_url: "http://127.0.0.1:8470".into(),
                 ..Default::default()
-            })
+            });
+        if cfg!(windows) {
+            if s.token.is_empty() {
+                s.token = creds::load_token().unwrap_or_default();
+            } else if s.save().is_ok() {
+                // Older file with a plaintext token: save() moved it into Credential Manager and
+                // rewrote the file without it.
+                tracing::info!("moved the technician token into Windows Credential Manager");
+            }
+        }
+        s
     }
 
     fn save(&self) -> Result<(), String> {
+        // The credential is written first so a failure can't leave us with neither copy.
+        creds::save_token(&self.token)?;
         let p = Self::path().ok_or("APPDATA not set")?;
         std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
         std::fs::write(p, toml::to_string(self).map_err(|e| e.to_string())?)

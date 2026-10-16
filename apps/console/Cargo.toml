@@ -23,3 +23,6 @@ sha2 = "0.10"
 hex = "0.4"
 uuid.workspace = true
 iced = { version = "0.14", features = ["tokio"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
