@@ -192,10 +192,10 @@ Each module: agent operation + authorization + audit + console tab. Build one fu
 
 | ID | Status | Owner | Task | Notes |
 |---|---|---|---|---|
-| T-800 | [ ] | | Job model + `crates/automation`: targets, per-endpoint progress, results | |
+| T-800 | [~] | claude | Job model + `crates/automation`: targets, per-endpoint progress, results | |
 | T-801 | [ ] | | Device groups: static, OU-dynamic, tag/filter-dynamic | |
 | T-802 | [ ] | | Scheduling, retries, cancellation, concurrency limits | |
-| T-803 | [ ] | | Per-endpoint per-action authz; confirmation with target count preview | |
+| T-803 | [~] | claude | Per-endpoint per-action authz; confirmation with target count preview | |
 | T-804 | [ ] | | Reports + export (CSV/JSON), execution history | |
 | T-805 | [ ] | | Compliance checks + remediation | |
 | T-806 | [ ] | | RBAC: roles, endpoint scopes, action scopes; UI hides disallowed modules | §12.4 |
