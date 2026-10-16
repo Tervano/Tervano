@@ -36,7 +36,13 @@ impl TechAuth {
         self.scoped.then_some(self.name.as_str())
     }
 
-    pub(crate) async fn deny(&self, s: &AppState, action: &str, target: &str, why: String) -> AppError {
+    pub(crate) async fn deny(
+        &self,
+        s: &AppState,
+        action: &str,
+        target: &str,
+        why: String,
+    ) -> AppError {
         audit(
             &s.db,
             &format!("tech:{}", self.name),
