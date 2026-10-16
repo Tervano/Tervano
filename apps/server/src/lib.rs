@@ -2,6 +2,7 @@
 
 pub mod audit_archive;
 mod compliance;
+mod facts;
 mod groups;
 mod rbac;
 mod reports;
@@ -488,6 +489,13 @@ pub async fn revoke_device(db: &SqlitePool, id: Uuid, actor: &str) -> anyhow::Re
         .bind(id.to_string())
         .execute(&mut *tx)
         .await?;
+    // The inventory projections only describe live devices (reports skip the devices join).
+    for table in ["device_software", "device_facts"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE device_id = ?"))
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+    }
     sqlx::query("INSERT INTO audit_log (at, actor, action, target, ok, detail) VALUES (?, ?, 'device.revoke', ?, 1, ?)")
         .bind(now_millis())
         .bind(actor)
@@ -1324,6 +1332,7 @@ async fn ingest_inventory(
             "inventory exceeds sanity limits",
         )));
     }
+    let mut tx = s.db.begin().await?;
     sqlx::query(
         "INSERT INTO device_inventory (device_id, collected_at, received_at, report_json)
          VALUES (?, ?, ?, ?)
@@ -1334,8 +1343,10 @@ async fn ingest_inventory(
     .bind(report.collected_at)
     .bind(now_millis())
     .bind(serde_json::to_string(&report).expect("report serializes"))
-    .execute(&s.db)
+    .execute(&mut *tx)
     .await?;
+    facts::write(&mut tx, &dev.id, &report).await?;
+    tx.commit().await?;
     tracing::info!(device = %dev.id, apps = report.software.apps.len(), "inventory stored");
     Ok(StatusCode::NO_CONTENT)
 }

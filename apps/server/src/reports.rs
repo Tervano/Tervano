@@ -1,6 +1,6 @@
 //! Fleet reports (T-804): software, OS and hardware views built from the stored device state and
-//! the latest inventory snapshots. Every report follows the caller's device scope (T-806). The
-//! software report aggregates in SQLite (JSON1) so it never loads whole inventories into memory.
+//! the latest inventory snapshots. Every report follows the caller's device scope (T-806) and reads
+//! the inventory projections (`device_software`, `device_facts`, T-813), not the inventory JSON.
 
 use super::*;
 
@@ -47,22 +47,18 @@ pub(crate) async fn software(
             "filter too long",
         )));
     }
-    let rows = sqlx::query(&format!(
-        "SELECT json_extract(a.value, '$.name') AS name,
-                json_extract(a.value, '$.version') AS version,
-                json_extract(a.value, '$.publisher') AS publisher,
-                COUNT(DISTINCT d.id) AS devices
-         FROM devices d
-         JOIN device_inventory i ON i.device_id = d.id
-         JOIN json_each(i.report_json, '$.software.apps') a
-         WHERE d.revoked = 0 AND {}
-           AND (?1 = '' OR json_extract(a.value, '$.name') LIKE ?2 ESCAPE '\\'
-                OR json_extract(a.value, '$.publisher') LIKE ?2 ESCAPE '\\')
+    // device_software holds live devices only (rows go on revoke), so no devices join: the
+    // covering index answers the grouping on its own.
+    let rows = sqlx::query(
+        "SELECT a.name, a.version, a.publisher, COUNT(DISTINCT a.device_id) AS devices
+         FROM device_software a
+         WHERE (?4 IS NULL OR a.device_id IN (SELECT m.device_id FROM group_members m
+                 JOIN technician_scopes ts ON ts.group_id = m.group_id WHERE ts.technician = ?4))
+           AND (?1 = '' OR a.name LIKE ?2 ESCAPE '\\' OR a.publisher LIKE ?2 ESCAPE '\\')
          GROUP BY 1, 2, 3
          ORDER BY devices DESC, name COLLATE NOCASE, version
          LIMIT ?3",
-        scope(4)
-    ))
+    )
     .bind(q)
     .bind(like_contains(q))
     .bind(i64::from(p.limit.clamp(1, 5000)))
@@ -97,11 +93,10 @@ pub(crate) async fn software_devices(
     let rows = sqlx::query(&format!(
         "SELECT DISTINCT d.id, d.hostname, d.last_seen
          FROM devices d
-         JOIN device_inventory i ON i.device_id = d.id
-         JOIN json_each(i.report_json, '$.software.apps') a
+         JOIN device_software a ON a.device_id = d.id
          WHERE d.revoked = 0 AND {}
-           AND json_extract(a.value, '$.name') = ?1
-           AND (?2 IS NULL OR IFNULL(json_extract(a.value, '$.version'), '') = ?2)
+           AND a.name = ?1
+           AND (?2 IS NULL OR IFNULL(a.version, '') = ?2)
          ORDER BY d.hostname COLLATE NOCASE
          LIMIT 5000",
         scope(3)
@@ -174,18 +169,11 @@ pub(crate) async fn hardware(
     tech: TechAuth,
 ) -> Result<Json<Vec<HardwareReportRow>>, AppError> {
     let rows = sqlx::query(&format!(
-        "SELECT d.id, d.hostname, i.collected_at,
-                json_extract(i.report_json, '$.hardware.manufacturer') AS manufacturer,
-                json_extract(i.report_json, '$.hardware.model') AS model,
-                json_extract(i.report_json, '$.hardware.serial_number') AS serial,
-                json_extract(i.report_json, '$.hardware.cpu_model') AS cpu,
-                json_extract(i.report_json, '$.hardware.cpu_logical_cores') AS cores,
-                json_extract(i.report_json, '$.hardware.memory_total_bytes') AS memory,
-                json_extract(i.report_json, '$.hardware.tpm_version') AS tpm,
-                json_extract(i.report_json, '$.hardware.secure_boot') AS secure_boot,
-                json_extract(i.report_json, '$.hardware.disks') AS disks,
-                json_array_length(i.report_json, '$.software.reboot_pending') AS reboot
-         FROM devices d JOIN device_inventory i ON i.device_id = d.id
+        "SELECT d.id, d.hostname, f.collected_at, f.manufacturer, f.model,
+                f.serial_number AS serial, f.cpu_model AS cpu, f.cpu_logical_cores AS cores,
+                f.memory_total_bytes AS memory, f.tpm_version AS tpm, f.secure_boot,
+                f.system_disk_total_bytes, f.system_disk_free_bytes, f.reboot_pending
+         FROM devices d JOIN device_facts f ON f.device_id = d.id
          WHERE d.revoked = 0 AND {}
          ORDER BY d.hostname COLLATE NOCASE",
         scope(1)
@@ -196,13 +184,6 @@ pub(crate) async fn hardware(
     Ok(Json(
         rows.iter()
             .filter_map(|r| {
-                let disks: Vec<DiskInfo> =
-                    serde_json::from_str(r.get::<Option<&str>, _>("disks")?).ok()?;
-                // The Windows system drive, else the first fixed disk.
-                let system = disks
-                    .iter()
-                    .find(|d| d.mount_point.eq_ignore_ascii_case("C:\\"))
-                    .or_else(|| disks.iter().find(|d| !d.removable));
                 Some(HardwareReportRow {
                     device_id: r.get::<&str, _>("id").parse().ok()?,
                     hostname: r.get("hostname"),
@@ -213,11 +194,15 @@ pub(crate) async fn hardware(
                     cpu_model: r.get::<Option<String>, _>("cpu").unwrap_or_default(),
                     cpu_logical_cores: r.get::<Option<i64>, _>("cores").unwrap_or(0) as u32,
                     memory_total_bytes: r.get::<Option<i64>, _>("memory").unwrap_or(0) as u64,
-                    system_disk_total_bytes: system.map(|d| d.total_bytes),
-                    system_disk_free_bytes: system.map(|d| d.free_bytes),
+                    system_disk_total_bytes: r
+                        .get::<Option<i64>, _>("system_disk_total_bytes")
+                        .map(|b| b as u64),
+                    system_disk_free_bytes: r
+                        .get::<Option<i64>, _>("system_disk_free_bytes")
+                        .map(|b| b as u64),
                     tpm_version: r.get("tpm"),
                     secure_boot: r.get::<Option<i64>, _>("secure_boot").map(|b| b != 0),
-                    reboot_pending: r.get::<Option<i64>, _>("reboot").unwrap_or(0) > 0,
+                    reboot_pending: !r.get::<&str, _>("reboot_pending").is_empty(),
                 })
             })
             .collect(),

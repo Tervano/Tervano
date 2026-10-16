@@ -68,16 +68,64 @@ fn validate(rule: &ComplianceRule) -> Result<(), AppError> {
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
-/// Judges one device. `os_build` comes from the device's live state, the rest from its inventory.
+/// What compliance needs of a device's latest inventory (its `device_facts` row).
+struct Facts {
+    collected_at: Millis,
+    tpm_version: Option<String>,
+    secure_boot: Option<bool>,
+    /// Reasons joined with "; "; empty when no restart is pending.
+    reboot_pending: String,
+    disk_mount: Option<String>,
+    disk_free: Option<i64>,
+}
+
+struct Device {
+    id: Uuid,
+    hostname: String,
+    os_build: Option<String>,
+    /// `None` until the agent has sent an inventory.
+    facts: Option<Facts>,
+}
+
+/// Installed apps (name, version) per device, for one software rule.
+type SoftwareMatches = HashMap<Uuid, Vec<(String, Option<String>)>>;
+
+/// Apps whose lowercased name contains the rule's name, grouped by device; empty for other rules.
+async fn software_matches(
+    db: &SqlitePool,
+    rule: &ComplianceRule,
+) -> Result<SoftwareMatches, AppError> {
+    let needle = match rule {
+        ComplianceRule::SoftwarePresent { name, .. } | ComplianceRule::SoftwareAbsent { name } => {
+            name.trim().to_lowercase()
+        }
+        _ => return Ok(SoftwareMatches::new()),
+    };
+    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT device_id, name, version FROM device_software WHERE instr(name_lower, ?) > 0",
+    )
+    .bind(needle)
+    .fetch_all(db)
+    .await?;
+    let mut out = SoftwareMatches::new();
+    for (device, name, version) in rows {
+        if let Ok(id) = device.parse() {
+            out.entry(id).or_default().push((name, version));
+        }
+    }
+    Ok(out)
+}
+
+/// Judges one device. The OS build comes from its live state, the rest from its latest inventory.
 fn evaluate(
     rule: &ComplianceRule,
-    os_build: Option<&str>,
-    inv: Option<&InventoryReport>,
+    d: &Device,
+    software: &SoftwareMatches,
 ) -> (ComplianceStatus, String) {
     use ComplianceStatus::*;
     let verdict = |pass: bool, detail: String| (if pass { Pass } else { Fail }, detail);
     if let ComplianceRule::OsBuildAtLeast { build } = rule {
-        return match os_build {
+        return match &d.os_build {
             Some(b) => verdict(
                 version_cmp(b, build) != Ordering::Less,
                 format!("build {b}"),
@@ -85,74 +133,57 @@ fn evaluate(
             None => (Unknown, "no OS build reported".into()),
         };
     }
-    let Some(inv) = inv else {
+    let Some(f) = &d.facts else {
         return (Unknown, "no inventory received yet".into());
     };
-    let matching = |needle: &str| {
-        let needle = needle.trim().to_lowercase();
-        inv.software
-            .apps
-            .iter()
-            .filter(move |a| a.name.to_lowercase().contains(&needle))
-    };
+    let matching = software.get(&d.id).map(Vec::as_slice).unwrap_or(&[]);
     match rule {
-        ComplianceRule::SoftwarePresent { name, min_version } => {
-            let best = matching(name).max_by(|a, b| {
-                version_cmp(
-                    a.version.as_deref().unwrap_or(""),
-                    b.version.as_deref().unwrap_or(""),
-                )
+        ComplianceRule::SoftwarePresent { min_version, .. } => {
+            let best = matching.iter().max_by(|a, b| {
+                version_cmp(a.1.as_deref().unwrap_or(""), b.1.as_deref().unwrap_or(""))
             });
             match (best, min_version) {
                 (None, _) => (Fail, "not installed".into()),
-                (Some(a), None) => (Pass, describe(a)),
-                (Some(a), Some(min)) => verdict(
-                    a.version
-                        .as_deref()
+                (Some((n, v)), None) => (Pass, describe(n, v.as_deref())),
+                (Some((n, v)), Some(min)) => verdict(
+                    v.as_deref()
                         .is_some_and(|v| version_cmp(v, min) != Ordering::Less),
-                    describe(a),
+                    describe(n, v.as_deref()),
                 ),
             }
         }
-        ComplianceRule::SoftwareAbsent { name } => match matching(name).next() {
-            Some(a) => (Fail, format!("found {}", describe(a))),
+        ComplianceRule::SoftwareAbsent { .. } => match matching.first() {
+            Some((n, v)) => (Fail, format!("found {}", describe(n, v.as_deref()))),
             None => (Pass, "not installed".into()),
         },
-        ComplianceRule::NoRebootPending => {
-            let r = &inv.software.reboot_pending;
-            verdict(
-                r.is_empty(),
-                if r.is_empty() {
-                    "no reboot pending".into()
-                } else {
-                    r.join("; ")
-                },
-            )
-        }
-        ComplianceRule::SecureBootOn => match inv.hardware.secure_boot {
+        ComplianceRule::NoRebootPending => verdict(
+            f.reboot_pending.is_empty(),
+            if f.reboot_pending.is_empty() {
+                "no reboot pending".into()
+            } else {
+                f.reboot_pending.clone()
+            },
+        ),
+        ComplianceRule::SecureBootOn => match f.secure_boot {
             Some(on) => verdict(on, if on { "on" } else { "off" }.into()),
             None => (Unknown, "Secure Boot state not reported".into()),
         },
-        ComplianceRule::TpmPresent => match &inv.hardware.tpm_version {
+        ComplianceRule::TpmPresent => match &f.tpm_version {
             Some(v) => (Pass, format!("TPM {v}")),
             None => (Fail, "no TPM visible".into()),
         },
-        ComplianceRule::DiskFreeAtLeast { gib } => {
-            let disks = &inv.hardware.disks;
-            let system = disks
-                .iter()
-                .find(|d| d.mount_point.eq_ignore_ascii_case("C:\\"))
-                .or_else(|| disks.iter().find(|d| !d.removable));
-            match system {
-                Some(d) => verdict(
-                    d.free_bytes >= u64::from(*gib) * GIB,
-                    format!("{} GiB free on {}", d.free_bytes / GIB, d.mount_point),
-                ),
-                None => (Unknown, "no fixed disk reported".into()),
+        ComplianceRule::DiskFreeAtLeast { gib } => match (f.disk_free, &f.disk_mount) {
+            (Some(free), Some(mount)) => {
+                let free = free.max(0) as u64;
+                verdict(
+                    free >= u64::from(*gib) * GIB,
+                    format!("{} GiB free on {mount}", free / GIB),
+                )
             }
-        }
+            _ => (Unknown, "no fixed disk reported".into()),
+        },
         ComplianceRule::InventoryNewerThan { days } => {
-            let age_days = (now_millis() - inv.collected_at).max(0) / 86_400_000;
+            let age_days = (now_millis() - f.collected_at).max(0) / 86_400_000;
             verdict(
                 age_days < i64::from(*days),
                 format!("collected {age_days} day(s) ago"),
@@ -162,26 +193,20 @@ fn evaluate(
     }
 }
 
-fn describe(a: &InstalledApp) -> String {
-    match &a.version {
-        Some(v) => format!("{} {v}", a.name),
-        None => a.name.clone(),
+fn describe(name: &str, version: Option<&str>) -> String {
+    match version {
+        Some(v) => format!("{name} {v}"),
+        None => name.to_owned(),
     }
 }
 
-struct Device {
-    id: Uuid,
-    hostname: String,
-    os_build: Option<String>,
-    inventory: Option<InventoryReport>,
-}
-
-/// Every non-revoked device the technician can see, with its build and parsed inventory.
-// shortcut: parses every inventory per request; cache evaluations if fleets get large, T-813.
+/// Every non-revoked device the technician can see, with its build and inventory facts.
 async fn devices(db: &SqlitePool, tech: &TechAuth) -> Result<Vec<Device>, AppError> {
     let rows = sqlx::query(
-        "SELECT d.id, d.hostname, json_extract(d.state_json, '$.os.build') AS build, i.report_json
-         FROM devices d LEFT JOIN device_inventory i ON i.device_id = d.id
+        "SELECT d.id, d.hostname, json_extract(d.state_json, '$.os.build') AS build,
+                f.collected_at, f.tpm_version, f.secure_boot, f.reboot_pending,
+                f.system_disk_mount, f.system_disk_free_bytes
+         FROM devices d LEFT JOIN device_facts f ON f.device_id = d.id
          WHERE d.revoked = 0 AND (?1 IS NULL OR d.id IN (SELECT m.device_id FROM group_members m
              JOIN technician_scopes ts ON ts.group_id = m.group_id WHERE ts.technician = ?1))
          ORDER BY d.hostname COLLATE NOCASE",
@@ -196,9 +221,18 @@ async fn devices(db: &SqlitePool, tech: &TechAuth) -> Result<Vec<Device>, AppErr
                 id: r.get::<&str, _>("id").parse().ok()?,
                 hostname: r.get("hostname"),
                 os_build: r.get("build"),
-                inventory: r
-                    .get::<Option<&str>, _>("report_json")
-                    .and_then(|j| serde_json::from_str(j).ok()),
+                facts: r
+                    .get::<Option<i64>, _>("collected_at")
+                    .map(|collected_at| Facts {
+                        collected_at,
+                        tpm_version: r.get("tpm_version"),
+                        secure_boot: r.get::<Option<i64>, _>("secure_boot").map(|b| b != 0),
+                        reboot_pending: r
+                            .get::<Option<String>, _>("reboot_pending")
+                            .unwrap_or_default(),
+                        disk_mount: r.get("system_disk_mount"),
+                        disk_free: r.get("system_disk_free_bytes"),
+                    }),
             })
         })
         .collect())
@@ -253,16 +287,21 @@ async fn stored(db: &SqlitePool, only: Option<Uuid>) -> Result<Vec<Stored>, AppE
         .collect()
 }
 
-fn with_counts(c: Stored, devices: &[Device]) -> ComplianceCheck {
+async fn with_counts(
+    db: &SqlitePool,
+    c: Stored,
+    devices: &[Device],
+) -> Result<ComplianceCheck, AppError> {
+    let software = software_matches(db, &c.rule).await?;
     let (mut passing, mut failing, mut unknown) = (0, 0, 0);
     for d in devices {
-        match evaluate(&c.rule, d.os_build.as_deref(), d.inventory.as_ref()).0 {
+        match evaluate(&c.rule, d, &software).0 {
             ComplianceStatus::Pass => passing += 1,
             ComplianceStatus::Fail => failing += 1,
             ComplianceStatus::Unknown => unknown += 1,
         }
     }
-    ComplianceCheck {
+    Ok(ComplianceCheck {
         id: c.id,
         name: c.name,
         rule: c.rule,
@@ -272,7 +311,7 @@ fn with_counts(c: Stored, devices: &[Device]) -> ComplianceCheck {
         passing,
         failing,
         unknown,
-    }
+    })
 }
 
 pub(crate) async fn list(
@@ -280,13 +319,11 @@ pub(crate) async fn list(
     tech: TechAuth,
 ) -> Result<Json<Vec<ComplianceCheck>>, AppError> {
     let devices = devices(&s.db, &tech).await?;
-    let checks = stored(&s.db, None).await?;
-    Ok(Json(
-        checks
-            .into_iter()
-            .map(|c| with_counts(c, &devices))
-            .collect(),
-    ))
+    let mut out = Vec::new();
+    for c in stored(&s.db, None).await? {
+        out.push(with_counts(&s.db, c, &devices).await?);
+    }
+    Ok(Json(out))
 }
 
 pub(crate) async fn results(
@@ -295,12 +332,12 @@ pub(crate) async fn results(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<ComplianceResult>>, AppError> {
     let check = stored(&s.db, Some(id)).await?.pop().ok_or_else(not_found)?;
+    let software = software_matches(&s.db, &check.rule).await?;
     let mut out: Vec<ComplianceResult> = devices(&s.db, &tech)
         .await?
         .into_iter()
         .map(|d| {
-            let (status, detail) =
-                evaluate(&check.rule, d.os_build.as_deref(), d.inventory.as_ref());
+            let (status, detail) = evaluate(&check.rule, &d, &software);
             ComplianceResult {
                 device_id: d.id,
                 hostname: d.hostname,
@@ -394,7 +431,7 @@ pub(crate) async fn create(
     .await;
     let devices = devices(&s.db, &tech).await?;
     let check = stored(&s.db, Some(id)).await?.pop().ok_or_else(not_found)?;
-    Ok(Json(with_counts(check, &devices)))
+    Ok(Json(with_counts(&s.db, check, &devices).await?))
 }
 
 pub(crate) async fn delete_check(
