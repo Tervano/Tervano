@@ -107,6 +107,11 @@ impl Client {
         self.get(req).await
     }
 
+    pub async fn me(&self) -> Result<TechnicianInfo, String> {
+        self.get(self.http.get(format!("{}/api/v1/me", self.base)))
+            .await
+    }
+
     pub async fn groups(&self) -> Result<Vec<DeviceGroup>, String> {
         self.get(self.http.get(format!("{}/api/v1/groups", self.base)))
             .await

@@ -2,6 +2,9 @@
 
 pub mod audit_archive;
 mod groups;
+mod rbac;
+
+pub use rbac::set_technician_access;
 mod jobs;
 
 use axum::{
@@ -515,6 +518,7 @@ pub fn app(state: AppState) -> Router {
         .route("/devices/{id}", get(device_details))
         .route("/devices/{id}/events", get(device_events))
         .route("/audit", get(list_audit))
+        .route("/me", get(rbac::me))
         .route(
             "/groups",
             get(groups::list_groups).post(groups::create_group),
@@ -587,10 +591,9 @@ async fn readyz(State(s): State<AppState>) -> StatusCode {
 }
 
 /// Prometheus text exposition; only aggregate counts are exposed to authenticated technicians.
-async fn metrics(
-    State(s): State<AppState>,
-    _tech: TechAuth,
-) -> Result<impl IntoResponse, AppError> {
+async fn metrics(State(s): State<AppState>, tech: TechAuth) -> Result<impl IntoResponse, AppError> {
+    tech.require(&s, TechRole::Admin, "metrics.read", "")
+        .await?;
     let cutoff = now_millis() - s.offline_after_ms;
     let (devices, online, stored_events): (i64, i64, i64) = sqlx::query_as(
         "SELECT (SELECT COUNT(*) FROM devices WHERE revoked = 0),
@@ -709,10 +712,12 @@ impl FromRequestParts<AppState> for DeviceAuth {
     }
 }
 
-/// An authenticated technician.
+/// An authenticated technician, with their role and whether a device scope limits them.
 pub struct TechAuth {
     pub name: String,
     token_hash: String,
+    pub role: TechRole,
+    pub scoped: bool,
 }
 
 async fn technician_token_active(db: &SqlitePool, token_hash: &str) -> Result<bool, sqlx::Error> {
@@ -732,15 +737,22 @@ impl FromRequestParts<AppState> for TechAuth {
             || AppError::new(err(StatusCode::UNAUTHORIZED, "invalid technician token"));
         let token = bearer(parts).ok_or_else(unauthorized)?;
         let token_hash = hash_secret(token);
-        let name: Option<String> = sqlx::query_scalar(
-            "SELECT name FROM technicians WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?",
+        let row: Option<(String, String, bool)> = sqlx::query_as(
+            "SELECT name, role,
+                    EXISTS(SELECT 1 FROM technician_scopes ts WHERE ts.technician = technicians.name)
+             FROM technicians WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?",
         )
         .bind(&token_hash)
         .bind(now_millis())
         .fetch_optional(&s.db)
         .await?;
-        match name {
-            Some(name) => Ok(TechAuth { name, token_hash }),
+        match row {
+            Some((name, role, scoped)) => Ok(TechAuth {
+                name,
+                token_hash,
+                role: rbac::parse_role(&role),
+                scoped,
+            }),
             None => {
                 let client_ip = parts
                     .extensions
@@ -1027,7 +1039,7 @@ fn like_prefix(q: &str) -> String {
 /// Prefix search over hostname, logged-in username (also `DOMAIN\user`) and IP. Empty query lists all.
 async fn search_devices(
     State(s): State<AppState>,
-    _tech: TechAuth,
+    tech: TechAuth,
     Query(p): Query<SearchParams>,
 ) -> Result<Json<Vec<DeviceSummary>>, AppError> {
     let mut q = p.q.trim().to_owned();
@@ -1057,11 +1069,14 @@ async fn search_devices(
              WHERE revoked = 0
                AND id IN (SELECT device_id FROM device_search WHERE device_search MATCH ?1)
                AND (?3 IS NULL OR id IN (SELECT device_id FROM group_members WHERE group_id = ?3))
+               AND (?4 IS NULL OR id IN (SELECT m.device_id FROM group_members m
+                   JOIN technician_scopes ts ON ts.group_id = m.group_id WHERE ts.technician = ?4))
              ORDER BY hostname COLLATE NOCASE LIMIT ?2",
         )
         .bind(phrase)
         .bind(limit)
         .bind(&member_of)
+        .bind(tech.scope_name())
         .fetch_all(&s.db)
         .await?
     } else {
@@ -1073,11 +1088,14 @@ async fn search_devices(
                 OR EXISTS (SELECT 1 FROM device_sessions s WHERE s.device_id = d.id AND s.username LIKE ?1 ESCAPE '\\')
                 OR EXISTS (SELECT 1 FROM device_addresses a WHERE a.device_id = d.id AND a.address LIKE ?1 ESCAPE '\\'))
                AND (?3 IS NULL OR id IN (SELECT device_id FROM group_members WHERE group_id = ?3))
+               AND (?4 IS NULL OR id IN (SELECT m.device_id FROM group_members m
+                   JOIN technician_scopes ts ON ts.group_id = m.group_id WHERE ts.technician = ?4))
              ORDER BY hostname COLLATE NOCASE LIMIT ?2",
         )
         .bind(&pattern)
         .bind(limit)
         .bind(&member_of)
+        .bind(tech.scope_name())
         .fetch_all(&s.db)
         .await?
     };
@@ -1122,7 +1140,6 @@ fn primary_ip(addrs: &[NetAddress]) -> Option<String> {
 
 /// Server-sent events: `device` (data `{"id": ...}`) when a device's summary may have changed,
 /// `resync` when this client missed events and should reload everything.
-// shortcut: every technician sees every device id; scope by RBAC once it exists (T-806).
 async fn stream_changes(
     State(s): State<AppState>,
     tech: TechAuth,
@@ -1151,6 +1168,8 @@ async fn stream_changes(
                 _ = sender.closed() => break,
                 _ = recheck.tick() => None,
                 result = changes.recv() => match result {
+                    // Scoped technicians only hear about devices they can see.
+                    Ok(id) if !tech.sees_device(&s.db, &id.to_string()).await.unwrap_or(false) => None,
                     Ok(id) => Some(Event::default()
                         .event(STREAM_DEVICE)
                         .data(serde_json::to_string(&DeviceChanged { id }).expect("serializes"))),
@@ -1192,9 +1211,10 @@ struct AuditParams {
 // shortcut: any technician can read the audit log until RBAC (T-806).
 async fn list_audit(
     State(s): State<AppState>,
-    _tech: TechAuth,
+    tech: TechAuth,
     Query(p): Query<AuditParams>,
 ) -> Result<Json<Vec<AuditRecord>>, AppError> {
+    tech.require(&s, TechRole::Admin, "audit.read", "").await?;
     let rows = sqlx::query(
         "SELECT id, at, actor, action, target, ok, detail, client_ip FROM audit_log
          WHERE id < ? ORDER BY id DESC LIMIT ?",
@@ -1221,9 +1241,10 @@ async fn list_audit(
 
 async fn device_details(
     State(s): State<AppState>,
-    _tech: TechAuth,
+    tech: TechAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<DeviceDetails>, AppError> {
+    tech.check_device(&s.db, id).await?;
     let row = sqlx::query(
         "SELECT enrolled_at, last_seen, state_json FROM devices WHERE id = ? AND revoked = 0",
     )
@@ -1286,9 +1307,10 @@ async fn ingest_inventory(
 /// Latest inventory snapshot of a device; 404 until the agent has sent one.
 async fn device_inventory(
     State(s): State<AppState>,
-    _tech: TechAuth,
+    tech: TechAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<InventoryReport>, AppError> {
+    tech.check_device(&s.db, id).await?;
     let json: Option<String> = sqlx::query_scalar(
         "SELECT i.report_json FROM device_inventory i JOIN devices d ON d.id = i.device_id
          WHERE i.device_id = ? AND d.revoked = 0",
@@ -1310,10 +1332,11 @@ async fn device_inventory(
 
 async fn device_events(
     State(s): State<AppState>,
-    _tech: TechAuth,
+    tech: TechAuth,
     Path(id): Path<Uuid>,
     Query(p): Query<EventHistoryParams>,
 ) -> Result<Json<Vec<DeviceEventRecord>>, AppError> {
+    tech.check_device(&s.db, id).await?;
     let device_id = id.to_string();
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM devices WHERE id = ? AND revoked = 0)")

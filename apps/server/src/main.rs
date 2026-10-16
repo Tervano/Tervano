@@ -2,14 +2,35 @@ mod cert;
 
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, time::Duration};
+use tervano_protocol::TechRole;
 use tervano_server::audit_archive::{
     archive_audit, export_audit, spawn_audit_archiver, verify_archives,
 };
 use tervano_server::{
     AppState, Config, DEFAULT_TECH_TOKEN_HOURS, MAX_TECH_TOKEN_HOURS, app, audit, connect,
     create_enrollment_token, create_technician_with_ttl, revoke_technician, rotate_technician,
-    spawn_event_purger, spawn_offline_sweeper,
+    set_technician_access, spawn_event_purger, spawn_offline_sweeper,
 };
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum RoleArg {
+    /// Read devices, inventory, events and jobs.
+    Viewer,
+    /// Also queue and cancel jobs and edit device groups.
+    Operator,
+    /// Also the audit log, metrics and scope groups.
+    Admin,
+}
+
+impl From<RoleArg> for TechRole {
+    fn from(r: RoleArg) -> Self {
+        match r {
+            RoleArg::Viewer => TechRole::Viewer,
+            RoleArg::Operator => TechRole::Operator,
+            RoleArg::Admin => TechRole::Admin,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "tervano-server", version, about = "Tervano Server")]
@@ -72,6 +93,24 @@ enum TechCmd {
         /// Lifetime in hours (default 30 days, maximum 90 days).
         #[arg(long, default_value_t = DEFAULT_TECH_TOKEN_HOURS)]
         hours: u64,
+        #[arg(long, value_enum, default_value = "admin")]
+        role: RoleArg,
+        /// Limit to the devices of this static group (repeatable). Omit for every device.
+        #[arg(long)]
+        scope: Vec<String>,
+    },
+    /// Change a technician's role and/or device scope.
+    Set {
+        #[arg(long)]
+        name: String,
+        #[arg(long, value_enum)]
+        role: Option<RoleArg>,
+        /// Replace the scope with these static groups (repeatable).
+        #[arg(long, conflicts_with = "all_devices")]
+        scope: Vec<String>,
+        /// Remove the scope: the technician sees every device.
+        #[arg(long)]
+        all_devices: bool,
     },
     /// Replace an active or expired token and print the replacement once.
     Rotate {
@@ -247,7 +286,13 @@ async fn main() -> anyhow::Result<()> {
             println!("{token}");
         }
         Cmd::Tech {
-            cmd: TechCmd::Create { name, hours },
+            cmd:
+                TechCmd::Create {
+                    name,
+                    hours,
+                    role,
+                    scope,
+                },
         } => {
             let token = create_technician_with_ttl(&db, &name, tech_token_duration(hours)?).await?;
             audit(
@@ -260,7 +305,32 @@ async fn main() -> anyhow::Result<()> {
                 None,
             )
             .await;
+            let scope = (!scope.is_empty()).then_some(scope.as_slice());
+            if let Err(e) =
+                set_technician_access(&db, &name, Some(role.into()), scope, &cli_actor()).await
+            {
+                // Never leave a technician with more access than asked for.
+                revoke_technician(&db, &name, &cli_actor()).await?;
+                return Err(e.context(format!("{name} was created and then revoked")));
+            }
             println!("{token}");
+        }
+        Cmd::Tech {
+            cmd:
+                TechCmd::Set {
+                    name,
+                    role,
+                    scope,
+                    all_devices,
+                },
+        } => {
+            anyhow::ensure!(
+                role.is_some() || !scope.is_empty() || all_devices,
+                "nothing to change: pass --role, --scope or --all-devices"
+            );
+            let scope = (all_devices || !scope.is_empty()).then_some(scope.as_slice());
+            set_technician_access(&db, &name, role.map(Into::into), scope, &cli_actor()).await?;
+            println!("updated {name}");
         }
         Cmd::Tech {
             cmd: TechCmd::Rotate { name, hours },

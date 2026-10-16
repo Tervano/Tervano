@@ -80,9 +80,11 @@ async fn expire_stale(db: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// Jobs, newest first; `creator` limits them to one technician's (scoped technicians).
 async fn summaries(
     db: &SqlitePool,
     only: Option<Uuid>,
+    creator: Option<&str>,
     limit: u32,
 ) -> Result<Vec<JobSummary>, AppError> {
     let only = only.map(|id| id.to_string());
@@ -94,11 +96,12 @@ async fn summaries(
                 IFNULL(SUM(t.state = 'running'), 0) AS running,
                 IFNULL(SUM(t.state = 'exited' AND t.exit_code IS 0), 0) AS succeeded
          FROM jobs j LEFT JOIN job_targets t ON t.job_id = j.id
-         WHERE ?1 IS NULL OR j.id = ?1
+         WHERE (?1 IS NULL OR j.id = ?1) AND (?3 IS NULL OR j.created_by = ?3)
          GROUP BY j.id ORDER BY j.created_at DESC LIMIT ?2",
     )
     .bind(only)
     .bind(i64::from(limit))
+    .bind(creator)
     .fetch_all(db)
     .await?;
     rows.iter()
@@ -132,10 +135,19 @@ async fn summaries(
 }
 
 async fn summary(db: &SqlitePool, id: Uuid) -> Result<JobSummary, AppError> {
-    summaries(db, Some(id), 1)
+    summaries(db, Some(id), None, 1)
         .await?
         .pop()
         .ok_or_else(|| AppError::new(err(StatusCode::NOT_FOUND, "job not found")))
+}
+
+/// The job's summary if this technician may see it: scoped technicians see only their own jobs.
+async fn visible(db: &SqlitePool, tech: &TechAuth, id: Uuid) -> Result<JobSummary, AppError> {
+    let s = summary(db, id).await?;
+    if tech.scoped && s.created_by != tech.name {
+        return Err(AppError::new(err(StatusCode::NOT_FOUND, "job not found")));
+    }
+    Ok(s)
 }
 
 pub(crate) async fn create_job(
@@ -144,6 +156,8 @@ pub(crate) async fn create_job(
     client: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(req): Json<JobCreate>,
 ) -> Result<Json<JobSummary>, AppError> {
+    tech.require(&s, TechRole::Operator, "job.create", "")
+        .await?;
     let name = req.name.trim();
     if name.is_empty()
         || name.chars().count() > MAX_NAME_CHARS
@@ -196,6 +210,17 @@ pub(crate) async fn create_job(
             "{unknown} of the {} selected devices are unknown or revoked",
             devices.len()
         )));
+    }
+    if tech.scoped {
+        let mut outside = 0;
+        for d in &devices {
+            outside += usize::from(!tech.sees_device(&s.db, &d.to_string()).await?);
+        }
+        if outside > 0 {
+            drop(tx);
+            let why = format!("{outside} of the selected devices are outside your device scope");
+            return Err(tech.deny(&s, "job.create", "", why).await);
+        }
     }
     sqlx::query(
         "INSERT INTO jobs (id, name, created_by, created_at, shell, script, script_sha256,
@@ -254,20 +279,22 @@ fn default_list() -> u32 {
 
 pub(crate) async fn list_jobs(
     State(s): State<AppState>,
-    _tech: TechAuth,
+    tech: TechAuth,
     Query(p): Query<ListParams>,
 ) -> Result<Json<Vec<JobSummary>>, AppError> {
     expire_stale(&s.db).await?;
-    Ok(Json(summaries(&s.db, None, p.limit.clamp(1, 200)).await?))
+    Ok(Json(
+        summaries(&s.db, None, tech.scope_name(), p.limit.clamp(1, 200)).await?,
+    ))
 }
 
 pub(crate) async fn get_job(
     State(s): State<AppState>,
-    _tech: TechAuth,
+    tech: TechAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<JobDetail>, AppError> {
     expire_stale(&s.db).await?;
-    let summary = summary(&s.db, id).await?;
+    let summary = visible(&s.db, &tech, id).await?;
     let script: String = sqlx::query_scalar("SELECT script FROM jobs WHERE id = ?")
         .bind(id.to_string())
         .fetch_one(&s.db)
@@ -313,6 +340,9 @@ pub(crate) async fn cancel_job(
     client: Option<Extension<ConnectInfo<SocketAddr>>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<JobSummary>, AppError> {
+    tech.require(&s, TechRole::Operator, "job.cancel", &id.to_string())
+        .await?;
+    visible(&s.db, &tech, id).await?;
     let now = now_millis();
     let mut tx = s.db.begin().await?;
     let found = sqlx::query("UPDATE jobs SET cancelled_at = IFNULL(cancelled_at, ?) WHERE id = ?")

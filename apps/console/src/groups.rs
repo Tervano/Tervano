@@ -219,56 +219,59 @@ impl Console {
         ]
         .spacing(8)
         .align_y(Alignment::Center);
-        match g.active_group() {
-            Some(active) => {
-                if active.kind == GroupKind::Static {
+        // Hidden rather than refused: the server enforces the same rule (T-806).
+        if self.can_edit_groups() {
+            match g.active_group() {
+                Some(active) => {
+                    if active.kind == GroupKind::Static {
+                        bar = bar
+                            .push(
+                                button(text(format!("Add {n} ticked")).size(13))
+                                    .style(button::secondary)
+                                    .on_press_maybe(
+                                        (n > 0).then_some(Message::Group(GroupMsg::AddSelected)),
+                                    ),
+                            )
+                            .push(
+                                button(text(format!("Remove {n} ticked")).size(13))
+                                    .style(button::secondary)
+                                    .on_press_maybe(
+                                        (n > 0).then_some(Message::Group(GroupMsg::RemoveSelected)),
+                                    ),
+                            );
+                    }
+                    bar = bar.push(Space::new().width(Length::Fill)).push(
+                        button(text("Delete group").size(13))
+                            .style(button::danger)
+                            .on_press(Message::Group(GroupMsg::AskDelete)),
+                    );
+                }
+                None => {
                     bar = bar
+                        .push(Space::new().width(Length::Fill))
                         .push(
-                            button(text(format!("Add {n} ticked")).size(13))
+                            text_input("New group name", &g.name)
+                                .on_input(|s| Message::Group(GroupMsg::Name(s)))
+                                .size(13)
+                                .padding(6)
+                                .width(180),
+                        )
+                        .push(
+                            button(text(format!("Save {n} ticked")).size(13))
                                 .style(button::secondary)
                                 .on_press_maybe(
-                                    (n > 0).then_some(Message::Group(GroupMsg::AddSelected)),
+                                    (n > 0).then_some(Message::Group(GroupMsg::SaveSelection)),
                                 ),
                         )
                         .push(
-                            button(text(format!("Remove {n} ticked")).size(13))
+                            button(text("Save search").size(13))
                                 .style(button::secondary)
                                 .on_press_maybe(
-                                    (n > 0).then_some(Message::Group(GroupMsg::RemoveSelected)),
+                                    (!self.query.trim().is_empty())
+                                        .then_some(Message::Group(GroupMsg::SaveSearch)),
                                 ),
                         );
                 }
-                bar = bar.push(Space::new().width(Length::Fill)).push(
-                    button(text("Delete group").size(13))
-                        .style(button::danger)
-                        .on_press(Message::Group(GroupMsg::AskDelete)),
-                );
-            }
-            None => {
-                bar = bar
-                    .push(Space::new().width(Length::Fill))
-                    .push(
-                        text_input("New group name", &g.name)
-                            .on_input(|s| Message::Group(GroupMsg::Name(s)))
-                            .size(13)
-                            .padding(6)
-                            .width(180),
-                    )
-                    .push(
-                        button(text(format!("Save {n} ticked")).size(13))
-                            .style(button::secondary)
-                            .on_press_maybe(
-                                (n > 0).then_some(Message::Group(GroupMsg::SaveSelection)),
-                            ),
-                    )
-                    .push(
-                        button(text("Save search").size(13))
-                            .style(button::secondary)
-                            .on_press_maybe(
-                                (!self.query.trim().is_empty())
-                                    .then_some(Message::Group(GroupMsg::SaveSearch)),
-                            ),
-                    );
             }
         }
         let mut col = column![bar].spacing(6);

@@ -242,6 +242,7 @@ enum Message {
     BulkExport,
     Job(jobs::JobMsg),
     Group(groups::GroupMsg),
+    MeLoaded(Result<TechnicianInfo, String>),
 }
 
 /// How many endpoints a bulk run works on at once.
@@ -719,6 +720,8 @@ struct Console {
     bulk_notice: Option<Result<String, String>>,
     jobs: jobs::JobsState,
     groups: groups::GroupsState,
+    /// The signed-in server technician's role and scope (`GET /api/v1/me`).
+    me: Option<Result<TechnicianInfo, String>>,
 }
 
 impl Console {
@@ -829,9 +832,10 @@ impl Console {
             bulk_notice: None,
             jobs: jobs::JobsState::new(),
             groups: groups::GroupsState::new(),
+            me: None,
         };
         let task = if configured {
-            Task::batch([c.search(), c.load_groups()])
+            Task::batch([c.search(), c.load_groups(), c.load_me()])
         } else {
             Task::none()
         };
@@ -844,6 +848,24 @@ impl Console {
             &self.settings.token,
             &self.settings.ca_cert,
         )
+    }
+
+    fn load_me(&self) -> Task<Message> {
+        let client = self.client();
+        Task::perform(async move { client?.me().await }, Message::MeLoaded)
+    }
+
+    /// Whether the technician's role allows `min`. Unknown (not loaded, or an older server
+    /// without `/me`) allows it: the server decides either way, this only tidies the UI.
+    fn can(&self, min: TechRole) -> bool {
+        match &self.me {
+            Some(Ok(me)) => me.role >= min,
+            _ => true,
+        }
+    }
+
+    fn can_edit_groups(&self) -> bool {
+        self.can(TechRole::Operator) && !matches!(&self.me, Some(Ok(me)) if !me.scope.is_empty())
     }
 
     fn search(&mut self) -> Task<Message> {
@@ -977,6 +999,7 @@ impl Console {
             }
             Message::Job(m) => return self.jobs_update(m),
             Message::Group(m) => return self.groups_update(m),
+            Message::MeLoaded(r) => self.me = Some(r),
             Message::QueryChanged(q) => self.query = q,
             Message::Search => return self.search(),
             Message::Refresh => {
@@ -1033,7 +1056,8 @@ impl Console {
                     self.page = Page::Direct;
                 } else {
                     self.page = Page::Devices;
-                    return Task::batch([self.search(), self.load_groups()]);
+                    self.me = None;
+                    return Task::batch([self.search(), self.load_groups(), self.load_me()]);
                 }
             }
             Message::TechCertChanged(s) => self.draft.tech_cert = s,
@@ -1883,6 +1907,19 @@ impl Console {
             column![
                 text("Tervano").size(22),
                 text("Console").size(12).style(text::secondary),
+                text(match &self.me {
+                    Some(Ok(me)) if me.scope.is_empty() =>
+                        format!("{} · {}", me.name, role_label(me.role)),
+                    Some(Ok(me)) => format!(
+                        "{} · {} · {}",
+                        me.name,
+                        role_label(me.role),
+                        me.scope.join(", ")
+                    ),
+                    _ => String::new(),
+                })
+                .size(11)
+                .style(text::secondary),
                 Space::new().height(16),
                 nav("Devices", Page::Devices),
                 nav("Jobs", Page::Jobs),
@@ -4192,6 +4229,14 @@ fn csv_cell(s: &str) -> String {
         s.to_owned()
     };
     format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+fn role_label(r: TechRole) -> &'static str {
+    match r {
+        TechRole::Viewer => "viewer",
+        TechRole::Operator => "operator",
+        TechRole::Admin => "admin",
+    }
 }
 
 fn downloads_dir() -> Option<std::path::PathBuf> {

@@ -37,15 +37,23 @@ pub(crate) async fn lookup(
     Ok((kind, row.get("query")))
 }
 
-async fn load(db: &SqlitePool, only: Option<Uuid>) -> Result<Vec<DeviceGroup>, AppError> {
+/// Groups, or the one with id `only`; a scoped technician (`scope`) sees only their scope groups.
+async fn load(
+    db: &SqlitePool,
+    only: Option<Uuid>,
+    scope: Option<&str>,
+) -> Result<Vec<DeviceGroup>, AppError> {
     let rows = sqlx::query(
         "SELECT g.id, g.name, g.kind, g.query, g.created_by, g.created_at,
                 (SELECT COUNT(*) FROM group_members m JOIN devices d ON d.id = m.device_id
                  WHERE m.group_id = g.id AND d.revoked = 0) AS members
-         FROM device_groups g WHERE ?1 IS NULL OR g.id = ?1
+         FROM device_groups g
+         WHERE (?1 IS NULL OR g.id = ?1)
+           AND (?2 IS NULL OR g.id IN (SELECT group_id FROM technician_scopes WHERE technician = ?2))
          ORDER BY g.name COLLATE NOCASE",
     )
     .bind(only.map(|id| id.to_string()))
+    .bind(scope)
     .fetch_all(db)
     .await?;
     rows.iter()
@@ -73,9 +81,9 @@ async fn load(db: &SqlitePool, only: Option<Uuid>) -> Result<Vec<DeviceGroup>, A
 
 pub(crate) async fn list_groups(
     State(s): State<AppState>,
-    _tech: TechAuth,
+    tech: TechAuth,
 ) -> Result<Json<Vec<DeviceGroup>>, AppError> {
-    Ok(Json(load(&s.db, None).await?))
+    Ok(Json(load(&s.db, None, tech.scope_name()).await?))
 }
 
 /// Counts the ids that are enrolled, non-revoked devices.
@@ -101,6 +109,7 @@ pub(crate) async fn create_group(
     client: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(req): Json<GroupCreate>,
 ) -> Result<Json<DeviceGroup>, AppError> {
+    tech.may_edit_group(&s, None).await?;
     let name = req.name.trim();
     if name.is_empty()
         || name.chars().count() > MAX_NAME_CHARS
@@ -185,7 +194,7 @@ pub(crate) async fn create_group(
         client.map(|c| c.0.0.ip()),
     )
     .await;
-    load(&s.db, Some(id))
+    load(&s.db, Some(id), None)
         .await?
         .pop()
         .map(Json)
@@ -199,6 +208,7 @@ pub(crate) async fn change_members(
     Path(id): Path<Uuid>,
     Json(req): Json<GroupMembers>,
 ) -> Result<Json<DeviceGroup>, AppError> {
+    tech.may_edit_group(&s, Some(id)).await?;
     let add: BTreeSet<Uuid> = req.add.iter().copied().collect();
     let remove: BTreeSet<Uuid> = req.remove.iter().copied().collect();
     if add.len() + remove.len() > MAX_CHANGE {
@@ -248,7 +258,7 @@ pub(crate) async fn change_members(
         client.map(|c| c.0.0.ip()),
     )
     .await;
-    load(&s.db, Some(id))
+    load(&s.db, Some(id), None)
         .await?
         .pop()
         .map(Json)
@@ -261,6 +271,21 @@ pub(crate) async fn delete_group(
     client: Option<Extension<ConnectInfo<SocketAddr>>>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, AppError> {
+    tech.may_edit_group(&s, Some(id)).await?;
+    let scoped: Vec<String> =
+        sqlx::query_scalar("SELECT technician FROM technician_scopes WHERE group_id = ?")
+            .bind(id.to_string())
+            .fetch_all(&s.db)
+            .await?;
+    if !scoped.is_empty() {
+        return Err(AppError::new(err(
+            StatusCode::CONFLICT,
+            format!(
+                "this group is the device scope of {}; change their scope first",
+                scoped.join(", ")
+            ),
+        )));
+    }
     let name: Option<String> =
         sqlx::query_scalar("DELETE FROM device_groups WHERE id = ? RETURNING name")
             .bind(id.to_string())

@@ -15,6 +15,7 @@ the minor version; breaking ones bump the major version.
 | `POST /api/v1/enroll` | Use-limited enrollment token in JSON | Returns device ID and secret once |
 | `POST /api/v1/events` | Device bearer secret | Applies sequenced Agent events; replayed sequence numbers are skipped |
 | `GET /api/v1/devices`, `GET /api/v1/devices/{id}` | Technician bearer token | Search (`q`, optional `group` to search within a device group) and current details |
+| `GET /api/v1/me` | Technician bearer token | Name, role, device scope and token expiry of the caller |
 | `GET /api/v1/groups`, `POST /api/v1/groups`, `DELETE /api/v1/groups/{id}`, `POST /api/v1/groups/{id}/members` | Technician bearer token | Device groups: static (member list) or query (saved search evaluated on read) |
 | `GET /api/v1/devices/{id}/events` | Technician bearer token | Newest-first retained event history, up to 100 rows per page |
 | `GET /api/v1/audit` | Technician bearer token | Paginated audit records |
@@ -23,7 +24,7 @@ the minor version; breaking ones bump the major version.
 | `POST /api/v1/agent/jobs/claim`, `POST /api/v1/agent/jobs/{id}/progress`, `POST /api/v1/agent/jobs/{id}/result` | Device bearer secret | Next job for this device whose start time has come and whose `max_parallel` has room (204 if none); check-in every 5 s while running (reply says whether it was cancelled; 2 min without one marks it failed); its result (body up to 1 MiB, each output stream cut to 64 KiB) |
 | `GET /metrics` | Technician bearer token | Aggregate Prometheus text; no protocol header |
 
-Server `/api/v1` request bodies are capped at 256 KiB (inventory 2 MiB, job results 1 MiB). Agents run server jobs only if their `[server_jobs]` section allows the creating technician; the Server stores the script to hand it out and audits it by SHA-256. Event batches are capped
+Technician endpoints check the caller's role and device scope: insufficient role is 403 (audited), an out-of-scope device or another technician's job is 404. Server `/api/v1` request bodies are capped at 256 KiB (inventory 2 MiB, job results 1 MiB). Agents run server jobs only if their `[server_jobs]` section allows the creating technician; the Server stores the script to hand it out and audits it by SHA-256. Event batches are capped
 at 500; accepted events must have increasing `seq` values per device. The
 Server returns the highest applied sequence in `EventAck`. Agent timestamps are
 not trusted for retention: history uses Server receipt time. The metrics event

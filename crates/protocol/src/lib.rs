@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.18";
+pub const PROTOCOL_VERSION: &str = "1.19";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -662,6 +662,29 @@ pub struct TerminalOutput {
 pub struct TerminalSince {
     #[serde(default)]
     pub since: u64,
+}
+
+/// Server technician role (T-806); each includes the ones before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TechRole {
+    /// Read devices, inventory, events and jobs.
+    Viewer,
+    /// Also queue and cancel jobs, and edit device groups.
+    Operator,
+    /// Also the audit log, metrics, and groups used as technician scopes.
+    Admin,
+}
+
+/// `GET /api/v1/me`: the signed-in technician.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TechnicianInfo {
+    pub name: String,
+    pub role: TechRole,
+    /// Static groups this technician is limited to; empty = every device.
+    pub scope: Vec<String>,
+    /// When the API token expires.
+    pub expires_at: Millis,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

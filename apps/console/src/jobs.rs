@@ -346,7 +346,10 @@ impl Console {
                 .on_press_maybe((n > 0).then_some(Message::Job(JobMsg::ClearSelection))),
             button(text(format!("New job for {n}…")).size(13))
                 .style(button::primary)
-                .on_press_maybe((n > 0).then_some(Message::Job(JobMsg::NewForm))),
+                .on_press_maybe(
+                    (n > 0 && self.can(TechRole::Operator))
+                        .then_some(Message::Job(JobMsg::NewForm)),
+                ),
         ]
         .spacing(8)
         .align_y(Alignment::Center)
@@ -366,7 +369,10 @@ impl Console {
                 .on_press(Message::Job(JobMsg::Refresh)),
             button(text("New job"))
                 .style(button::primary)
-                .on_press(Message::Job(JobMsg::NewForm)),
+                .on_press_maybe(
+                    self.can(TechRole::Operator)
+                        .then_some(Message::Job(JobMsg::NewForm)),
+                ),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
@@ -559,12 +565,13 @@ impl Console {
                 button(text("Rerun failed").size(13))
                     .style(button::secondary)
                     .on_press_maybe(
-                        (finished(s) && s.failed > 0).then_some(Message::Job(JobMsg::Rerun))
+                        (finished(s) && s.failed > 0 && self.can(TechRole::Operator))
+                            .then_some(Message::Job(JobMsg::Rerun))
                     ),
                 button(text("Cancel job").size(13))
                     .style(button::danger)
                     .on_press_maybe(
-                        (!finished(s) && !s.cancelled)
+                        (!finished(s) && !s.cancelled && self.can(TechRole::Operator))
                             .then_some(Message::Job(JobMsg::Cancel(s.id)))
                     ),
                 button(text("Export CSV").size(13))
