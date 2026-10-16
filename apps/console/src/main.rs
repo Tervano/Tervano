@@ -844,9 +844,14 @@ impl Console {
             compliance: compliance::ComplianceState::new(),
         };
         let task = if configured {
-            Task::batch([c.search(), c.load_groups(), c.load_me()])
+            Task::batch([
+                c.search(),
+                c.load_groups(),
+                c.load_me(),
+                c.check_endpoints(),
+            ])
         } else {
-            Task::none()
+            c.check_endpoints()
         };
         (c, task)
     }
@@ -926,6 +931,18 @@ impl Console {
     }
 
     /// Reloads the selected endpoint's summary, plus its processes when that tab is open.
+    /// Checks every direct endpoint once, so the list shows which agents answer without the
+    /// technician having to open each one.
+    fn check_endpoints(&self) -> Task<Message> {
+        Task::batch(self.settings.endpoints.iter().filter_map(|e| {
+            let t = self.target(&e.address)?;
+            let addr = t.address.clone();
+            Some(Task::perform(direct::device(t), move |r| {
+                Message::DirectLoaded(addr.clone(), r)
+            }))
+        }))
+    }
+
     fn load_direct(&self, address: &str) -> Task<Message> {
         let Some(t) = self.target(address) else {
             return Task::none();
@@ -1002,6 +1019,9 @@ impl Console {
         match msg {
             Message::Nav(p) => {
                 self.page = p;
+                if p == Page::Direct {
+                    return self.check_endpoints();
+                }
                 if p == Page::Jobs && !self.settings.token.is_empty() {
                     return self.jobs_refresh();
                 }
@@ -4312,14 +4332,16 @@ fn status_dot<'a>(online: bool) -> Element<'a, Message> {
     } else {
         Color::from_rgb8(0x8a, 0x8f, 0x98)
     };
-    container(Space::new().width(10).height(10))
+    // The styled box is the dot itself; the outer one only reserves the column width.
+    let dot = container(Space::new())
+        .width(10)
+        .height(10)
         .style(move |_| container::Style {
             background: Some(color.into()),
             border: iced::border::rounded(5),
             ..Default::default()
-        })
-        .width(14)
-        .into()
+        });
+    container(dot).width(14).into()
 }
 
 fn centered<'a>(msg: &'a str) -> Element<'a, Message> {
