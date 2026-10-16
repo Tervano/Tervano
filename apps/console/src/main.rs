@@ -7,6 +7,7 @@ mod creds;
 mod direct;
 mod groups;
 mod jobs;
+mod nav;
 mod reports;
 
 use iced::widget::{
@@ -49,6 +50,12 @@ struct Settings {
     tech_key: String,
     /// Agents managed directly (serverless), each pinned to its certificate fingerprint.
     endpoints: Vec<Endpoint>,
+    /// Starred devices (T-309).
+    favorites: Vec<nav::SavedDevice>,
+    /// Recently opened devices, newest first.
+    recent: Vec<nav::SavedDevice>,
+    /// Recent device searches, newest first.
+    search_history: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -248,6 +255,7 @@ enum Message {
     MeLoaded(Result<TechnicianInfo, String>),
     TicketLoaded(String, Result<TicketResponse, String>),
     Report(reports::ReportMsg),
+    Navigate(nav::NavMsg),
     Compliance(compliance::ComplianceMsg),
 }
 
@@ -731,6 +739,7 @@ struct Console {
     /// Server connection tickets per direct endpoint address: (ticket, expires_at).
     tickets: std::collections::HashMap<String, (String, Millis)>,
     reports: reports::ReportsState,
+    nav: nav::NavState,
     compliance: compliance::ComplianceState,
 }
 
@@ -845,6 +854,7 @@ impl Console {
             me: None,
             tickets: Default::default(),
             reports: reports::ReportsState::new(),
+            nav: Default::default(),
             compliance: compliance::ComplianceState::new(),
         };
         let task = if configured {
@@ -1089,9 +1099,14 @@ impl Console {
                 Err(e) => tracing::debug!(endpoint = %addr, "no connection ticket: {e}"),
             },
             Message::Report(m) => return self.reports_update(m),
+            Message::Navigate(m) => return self.nav_update(m),
             Message::Compliance(m) => return self.compliance_update(m),
             Message::QueryChanged(q) => self.query = q,
-            Message::Search => return self.search(),
+            Message::Search => {
+                let q = self.query.clone();
+                self.remember_search(&q);
+                return self.search();
+            }
             Message::Refresh => {
                 if self.page == Page::Devices && !self.settings.token.is_empty() && !self.loading {
                     self.dirty = false;
@@ -1115,6 +1130,12 @@ impl Console {
             }
             Message::DetailsDone(r) => {
                 // Drop stale responses for a previously selected device.
+                if let Ok(d) = &r
+                    && Some(d.id) == self.selected
+                {
+                    let (id, host) = (d.id, d.state.hostname.clone());
+                    self.remember_device(id, &host);
+                }
                 if r.as_ref().map_or(true, |d| Some(d.id) == self.selected) {
                     self.details = Some(r);
                 }
@@ -1138,8 +1159,11 @@ impl Console {
                 self.draft.ca_cert = self.draft.ca_cert.trim().trim_matches('"').to_owned();
                 self.draft.tech_cert = self.draft.tech_cert.trim().trim_matches('"').to_owned();
                 self.draft.tech_key = self.draft.tech_key.trim().trim_matches('"').to_owned();
-                // Endpoints are edited on the Direct page, not via the draft.
+                // Endpoints and navigation history are kept elsewhere, not via the draft.
                 self.draft.endpoints = self.settings.endpoints.clone();
+                self.draft.favorites = self.settings.favorites.clone();
+                self.draft.recent = self.settings.recent.clone();
+                self.draft.search_history = self.settings.search_history.clone();
                 self.settings = self.draft.clone();
                 self.settings_status = Some(self.settings.save().map(|_| "Saved.".into()));
                 if self.settings.token.is_empty() {
@@ -1954,7 +1978,9 @@ impl Console {
         } else {
             Subscription::none()
         };
-        let direct_tick = Subscription::batch([direct_tick, cmd_tick, term_tick]);
+        // Keys no widget used: Ctrl+K, Ctrl+P, arrows, Esc (T-308).
+        let keys = iced::keyboard::listen().map(|e| Message::Navigate(nav::NavMsg::Key(e)));
+        let direct_tick = Subscription::batch([direct_tick, cmd_tick, term_tick, keys]);
         if self.settings.token.is_empty() {
             return direct_tick;
         }
@@ -2054,14 +2080,17 @@ impl Console {
             Page::Direct => self.direct_view(),
             Page::Settings => self.settings_view(),
         };
-        row![
+        let page = row![
             sidebar,
             container(main)
                 .padding(16)
                 .width(Length::Fill)
                 .height(Length::Fill)
-        ]
-        .into()
+        ];
+        match self.palette() {
+            Some(palette) => iced::widget::stack![page, palette].into(),
+            None => page.into(),
+        }
     }
 
     fn devices_view(&self) -> Element<'_, Message> {
@@ -2070,6 +2099,7 @@ impl Console {
                 "Search by computer name, user (DOMAIN\\user) or IP…",
                 &self.query
             )
+            .id(nav::search_id())
             .on_input(Message::QueryChanged)
             .on_submit(Message::Search)
             .padding(10)
@@ -2175,7 +2205,9 @@ impl Console {
             .spacing(12)
             .into(),
         };
-        column![self.groups_bar(), search, content]
+        column![self.groups_bar(), search]
+            .push(self.quick_access())
+            .push(content)
             .spacing(12)
             .into()
     }
@@ -2271,12 +2303,20 @@ impl Console {
                 extra.push(("Inventory", format!("collected {}", ago(inv.collected_at))));
             }
         }
-        state_panel(
-            &d.state,
-            d.online,
-            if d.online { "Online" } else { "Offline" },
-            extra,
-        )
+        column![
+            row![
+                Space::new().width(Length::Fill),
+                self.favorite_button(d.id, &d.state.hostname),
+            ],
+            state_panel(
+                &d.state,
+                d.online,
+                if d.online { "Online" } else { "Offline" },
+                extra,
+            ),
+        ]
+        .spacing(4)
+        .into()
     }
 
     fn direct_view(&self) -> Element<'_, Message> {

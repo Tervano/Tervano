@@ -54,6 +54,7 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Discovery | Find computers by hostname | Implemented | Windows | Via server |
 | Discovery | Find computers by logged-in user | Implemented | Windows | From real agent session data, not AD attributes |
 | Console | Search, device list, device details | Implemented | Windows | Loading / empty / error states |
+| Console | Favorites, recents, keyboard | Implemented | Windows | Starred and recently opened devices, recent searches; Ctrl+K search, ↑/↓ through results, Esc, and a Ctrl+P command palette |
 | Console | Live device updates | Implemented | Windows | Server push (SSE): logons, IP changes, online/offline appear within seconds; falls back to 15 s polling when the stream is down |
 | Agent | Direct (serverless) management listener | Partial | Windows | mTLS: technician client certs from the org CA, per-technician allowlist, agent cert pinned by fingerprint. Device, process, service, event-log, and hardware reads work; process/service changes require `operators` (elevated service changes remain unverified) |
 | Console | Serverless mode (Direct page) | Implemented | Windows | Add agents by address, confirm their certificate fingerprint on first contact, then use device, process, service, event-log, and hardware views over mutual TLS. Pin changes are refused with a warning |
