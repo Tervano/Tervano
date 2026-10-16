@@ -58,7 +58,7 @@ Status: `[ ]` todo · `[~]` locked / in progress by the owner · `[x]` done · `
 | T-112 | [ ] | | Search indexes + FTS (SQLite FTS5 / Postgres trigram) | §5. Benchmark harness (10k devices, P95) deferred with testing |
 | T-113 | [x] | claude | Server push: SSE `GET /api/v1/stream` (`device` {id} / `resync` on lag), bounded broadcast (1024), 5 s offline sweeper announces timeouts | Verified 2026-10-15 over TLS with curl: event on agent start, event ~10 s after agent killed (sweeper), `:` keep-alives every 15 s. Shortcut: all techs see all device ids until RBAC (T-806) |
 | T-114 | [x] | codex | Event history table + `GET /api/v1/devices/{id}/events` | Verified 2026-10-15 on Windows with a live server and existing DB migration: startup/state/shutdown returned newest first (seq 4,3,1); heartbeat omitted; `limit=2`/`before=3` paginated; replay did not duplicate; unauthorized→401, unknown device→404, oversized seq→400. Existing workspace tests, build, clippy, fmt clean. New events only; retention is T-120. |
-| T-115 | [ ] | | Device decommission / re-enroll (revoke secret) API + CLI | §5 device identity |
+| T-115 | [~] | claude | Device decommission / re-enroll (revoke secret) API + CLI | §5 device identity |
 | T-116 | [x] | codex | Rate limiting / body size limits / reconnect-storm backpressure | Verified 2026-10-15 on Windows with a live scratch Server: with enrollment limit 10/min, ten malformed requests returned 422 and the eleventh 429 with `Retry-After: 60`; health stayed 200 and a 256 KiB+1 request returned 413. A 105-request metrics burst returned 100×200 and 5×429. All 256 SSE slots connected, the 257th returned 429, and a new stream connected after one closed. Per-peer rates are configurable; 128 in-flight cap inspected in code, not load-tested. Workspace build, existing tests, clippy, fmt clean. Reverse proxies share one socket peer; use client-aware proxy limits. |
 | T-117 | [ ] | | Run as Windows service + systemd unit + Dockerfile | §15 |
 | T-118 | [x] | codex | Metrics endpoint (OpenTelemetry/Prometheus) incl. event volume | Verified 2026-10-15 on Windows against live scratch Server: unauthenticated and invalid-token /metrics returned 401; authenticated Prometheus text showed enrolled/online/stored counts; startup + heartbeat raised accepted-events counter to 2, replay left it at 2, restart reset it to 0 while stored count stayed 1. Workspace build, existing tests, clippy, fmt clean. Counter is process-lifetime, with no device/user labels. |
@@ -80,15 +80,15 @@ Status: `[ ]` todo · `[~]` locked / in progress by the owner · `[x]` done · `
 | T-207 | [x] | claude | Retry with exponential backoff on network failure, no duplicate state | |
 | T-208 | [x] | claude | Device secret protected with DPAPI (current account; LocalSystem in service mode); service mode ACLs state dir to SYSTEM + Administrators via icacls | Verified 2026-10-14: plaintext 0.1.0 identity.json auto-migrated to `protected_secret`, agent then reported OK. ACL step runs only in service mode — **not yet run** (needs T-201 verification) |
 | T-209 | [ ] | | Event-driven session changes (WTSRegisterSessionNotification / service control `SessionChange`) instead of poll-diff | §5 agent events |
-| T-210 | [ ] | | Event-driven network changes (NotifyIpInterfaceChange) | §5 |
+| T-210 | [~] | claude | Event-driven network changes (NotifyIpInterfaceChange) | §5 |
 | T-211 | [ ] | | Lock/unlock detection | §5 |
 | T-212 | [ ] | | Service recovery options (restart on failure) set at install | §14 |
 | T-213 | [ ] | | Bounded on-disk event queue for offline periods | §5 |
-| T-214 | [ ] | | Measure + document idle CPU/RAM (target ≤50 MB) | §14 |
+| T-214 | [~] | claude | Measure + document idle CPU/RAM (target ≤50 MB) | §14 |
 | T-215 | [x] | claude | Agent `ca_cert` option (+ Windows cert store via native roots); agent/console refuse `http://` to non-loopback | Verified agent over TLS with `ca_cert` and refusal of `http://192.168.1.142`. Console CA field added, not GUI-verified. Pinning dropped: CA trust is sufficient for now |
 | T-216 | [ ] | | Agent log rotation / Windows Event Log sink (service mode writes one unrotated `agent.log`) | |
 | T-218 | [ ] | | Service mode: errors before log init (bad config, icacls failure) are lost — write them to the Windows Event Log | |
-| T-217 | [ ] | | Heartbeat jitter + reconnect jitter to avoid thundering herd after server restart | §5 |
+| T-217 | [~] | claude | Heartbeat jitter + reconnect jitter to avoid thundering herd after server restart | §5 |
 | T-219 | [ ] | | Remove or securely retire agent bootstrap enrollment token after enrollment | Multi-use tokens may remain in plaintext `agent.toml` after `identity.json` is written. Define safe recovery/re-enrollment flow first. |
 
 ### Console
