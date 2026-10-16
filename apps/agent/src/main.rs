@@ -16,6 +16,7 @@ mod secure;
 mod service;
 mod services;
 mod software;
+mod terminal;
 mod wmiq;
 
 use anyhow::Context;
@@ -42,6 +43,9 @@ pub struct Config {
     /// The Windows certificate store is always trusted too.
     #[serde(default)]
     pub ca_cert: Option<PathBuf>,
+    /// File this config was loaded from (so the enrollment token can be cleared after use).
+    #[serde(skip)]
+    pub source: Option<PathBuf>,
     /// Direct management listener. Omit to disable.
     #[serde(default)]
     pub direct: Option<direct::DirectConfig>,
@@ -65,8 +69,9 @@ impl Config {
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         let s =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let cfg: Config =
+        let mut cfg: Config =
             toml::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
+        cfg.source = Some(path.to_owned());
         if let Some(url) = &cfg.server_url {
             anyhow::ensure!(
                 url_transport_ok(url),
@@ -213,6 +218,44 @@ impl Client {
     }
 }
 
+/// After a successful enrollment the bootstrap token has no further use on this machine, so it is
+/// blanked in the config file rather than left in plaintext (T-219). The file is rewritten in place
+/// so any ACL an administrator set on it is kept. Failure is only a warning: enrollment succeeded.
+fn clear_enrollment_token(cfg: &Config) {
+    let Some(path) = &cfg.source else { return };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let mut changed = false;
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| {
+            let key = l.trim_start();
+            if key.starts_with("enrollment_token")
+                && key["enrollment_token".len()..]
+                    .trim_start()
+                    .starts_with('=')
+            {
+                changed = true;
+                "enrollment_token = \"\"  # cleared by the agent after enrolling".to_owned()
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect();
+    if !changed {
+        return;
+    }
+    let ending = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    match std::fs::write(path, lines.join(ending) + ending) {
+        Ok(()) => tracing::info!("cleared the enrollment token from {}", path.display()),
+        Err(e) => tracing::warn!(
+            "could not clear the enrollment token from {}: {e}; remove it by hand",
+            path.display()
+        ),
+    }
+}
+
 /// Inventory is sent at startup and then daily; a failed upload is retried sooner.
 const INVENTORY_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 const INVENTORY_RETRY: Duration = Duration::from_secs(15 * 60);
@@ -296,6 +339,7 @@ async fn report(
                             device_secret: r.device_secret,
                         };
                         id.save(&id_path)?;
+                        clear_enrollment_token(cfg);
                         tracing::info!(device = %id.device_id, "enrolled");
                         break id;
                     }

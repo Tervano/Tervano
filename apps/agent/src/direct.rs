@@ -7,7 +7,7 @@
 
 use crate::{
     collect, eventlog, exec::Jobs, files, inventory, peripherals, processes::Processes, registry,
-    secure, services, software, wmiq,
+    secure, services, software, terminal::Terminals, wmiq,
 };
 use anyhow::Context;
 use axum::{
@@ -783,6 +783,72 @@ async fn update_status(
         .map_err(|e| api_err(StatusCode::CONFLICT, e))
 }
 
+async fn terminal_open(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    Extension(terms): Extension<Arc<Terminals>>,
+    headers: HeaderMap,
+    Json(req): Json<TerminalStart>,
+) -> ApiResult<Json<TerminalOutput>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::RunCommand)?;
+    let id = terms
+        .open(&tech.0, req.shell)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))?;
+    terms
+        .output(id, 0)
+        .map(Json)
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+async fn terminal_input(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    Extension(terms): Extension<Arc<Terminals>>,
+    headers: HeaderMap,
+    UrlPath(id): UrlPath<uuid::Uuid>,
+    Json(req): Json<TerminalInput>,
+) -> ApiResult<StatusCode> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::RunCommand)?;
+    terms
+        .input(&tech.0, id, &req.text)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))
+}
+
+async fn terminal_output(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    Extension(terms): Extension<Arc<Terminals>>,
+    headers: HeaderMap,
+    UrlPath(id): UrlPath<uuid::Uuid>,
+    Query(q): Query<TerminalSince>,
+) -> ApiResult<Json<TerminalOutput>> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::CommandStatus)?;
+    terms
+        .output(id, q.since)
+        .map(Json)
+        .map_err(|e| api_err(StatusCode::NOT_FOUND, e))
+}
+
+async fn terminal_close(
+    Extension(cfg): Extension<Arc<DirectConfig>>,
+    Extension(tech): Extension<Technician>,
+    Extension(terms): Extension<Arc<Terminals>>,
+    headers: HeaderMap,
+    UrlPath(id): UrlPath<uuid::Uuid>,
+) -> ApiResult<StatusCode> {
+    check_protocol(&headers)?;
+    authorize(&cfg, &tech, Op::RunCommand)?;
+    terms
+        .close(&tech.0, id)
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(|e| api_err(StatusCode::CONFLICT, e))
+}
+
 /// Serves direct management until `stop` fires.
 pub async fn serve(
     cfg: DirectConfig,
@@ -815,6 +881,10 @@ pub async fn serve(
         .route("/v1/exec", post(exec_start))
         .route("/v1/exec/{id}", get(exec_status))
         .route("/v1/exec/{id}/cancel", post(exec_cancel))
+        .route("/v1/terminal", post(terminal_open))
+        .route("/v1/terminal/{id}/input", post(terminal_input))
+        .route("/v1/terminal/{id}/output", get(terminal_output))
+        .route("/v1/terminal/{id}/close", post(terminal_close))
         .route("/v1/files/list", get(files_list))
         .route("/v1/files/read", get(files_read))
         .route("/v1/files/hash", get(files_hash))
@@ -835,6 +905,7 @@ pub async fn serve(
         .layer(Extension(Arc::new(cfg)))
         .layer(Extension(Arc::new(Processes::new())))
         .layer(Extension(Arc::new(Jobs::new(state_dir.clone()))))
+        .layer(Extension(Arc::new(Terminals::default())))
         // Scripts are capped at 64 KiB; leave room for the JSON envelope.
         .layer(axum::extract::DefaultBodyLimit::max(96 * 1024));
     let handle = axum_server::Handle::new();

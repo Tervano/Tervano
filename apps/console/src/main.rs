@@ -219,7 +219,18 @@ enum Message {
     WmiLoaded(Result<WmiTable, String>),
     WmiClasses(Result<Vec<String>, String>),
     UpdatesLoaded(String, Result<UpdateStatus, String>),
+    TermShell(ShellChoice),
+    TermOpen,
+    TermInput(String),
+    TermSend,
+    TermSent(Result<(), String>),
+    TermPoll,
+    TermUpdate(Result<TerminalOutput, String>),
+    TermClose,
 }
+
+/// Keep at most this much terminal scrollback in the Console.
+const TERM_SCROLLBACK: usize = 512 * 1024;
 
 /// A software change awaiting confirmation: (description, request).
 #[derive(Debug, Clone)]
@@ -558,6 +569,7 @@ enum DirectTab {
     Peripherals,
     Updates,
     Wmi,
+    Terminal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -670,6 +682,14 @@ struct Console {
     wmi_result: Option<Result<WmiTable, String>>,
     wmi_running: bool,
     updates: Option<(String, Result<UpdateStatus, String>)>,
+    term_shell: Shell,
+    /// (endpoint address, terminal id) of the open terminal.
+    term: Option<(String, uuid::Uuid)>,
+    term_text: String,
+    term_next: u64,
+    term_exited: Option<Option<i32>>,
+    term_input: String,
+    term_notice: Option<String>,
 }
 
 impl Console {
@@ -764,6 +784,13 @@ impl Console {
             wmi_result: None,
             wmi_running: false,
             updates: None,
+            term_shell: Shell::Powershell,
+            term: None,
+            term_text: String::new(),
+            term_next: 0,
+            term_exited: None,
+            term_input: String::new(),
+            term_notice: None,
         };
         let task = if configured { c.search() } else { Task::none() };
         (c, task)
@@ -876,6 +903,8 @@ impl Console {
                 Message::WmiClasses,
             ),
             DirectTab::Wmi => Task::none(),
+            // The terminal polls on its own subscription while open.
+            DirectTab::Terminal => Task::none(),
             DirectTab::Files => {
                 Task::perform(direct::files_list(t, self.files_path.clone()), move |r| {
                     Message::FilesLoaded(addr.clone(), r)
@@ -1521,6 +1550,78 @@ impl Console {
                     self.updates = Some((address, r));
                 }
             }
+            Message::TermShell(s) => self.term_shell = s.0,
+            Message::TermOpen => {
+                if let Some(t) = self.direct_selected.as_deref().and_then(|a| self.target(a)) {
+                    self.term = None;
+                    self.term_text.clear();
+                    self.term_next = 0;
+                    self.term_exited = None;
+                    self.term_notice = None;
+                    return Task::perform(
+                        direct::terminal_open(t, self.term_shell),
+                        Message::TermUpdate,
+                    );
+                }
+            }
+            Message::TermInput(s) => self.term_input = s,
+            Message::TermSend => {
+                if let Some((addr, id)) = &self.term
+                    && let Some(t) = self.target(addr)
+                {
+                    let text = format!("{}\r\n", self.term_input);
+                    self.term_input.clear();
+                    return Task::perform(direct::terminal_input(t, *id, text), Message::TermSent);
+                }
+            }
+            Message::TermSent(r) => {
+                if let Err(e) = r {
+                    self.term_notice = Some(e);
+                }
+            }
+            Message::TermPoll => {
+                if let Some((addr, id)) = &self.term
+                    && let Some(t) = self.target(addr)
+                {
+                    return Task::perform(
+                        direct::terminal_output(t, *id, self.term_next),
+                        Message::TermUpdate,
+                    );
+                }
+            }
+            Message::TermUpdate(r) => match r {
+                Ok(o) => {
+                    if self.term.is_none()
+                        && let Some(addr) = self.direct_selected.clone()
+                    {
+                        self.term = Some((addr, o.id));
+                    }
+                    if o.skipped {
+                        self.term_text
+                            .push_str("\n[earlier output dropped by the agent]\n");
+                    }
+                    self.term_text.push_str(&o.output);
+                    if self.term_text.len() > TERM_SCROLLBACK {
+                        let cut = self.term_text.len() - TERM_SCROLLBACK;
+                        let cut = (cut..self.term_text.len())
+                            .find(|&i| self.term_text.is_char_boundary(i))
+                            .unwrap_or(self.term_text.len());
+                        self.term_text.drain(..cut);
+                    }
+                    self.term_next = o.next;
+                    if o.exited {
+                        self.term_exited = Some(o.exit_code);
+                    }
+                }
+                Err(e) => self.term_notice = Some(e),
+            },
+            Message::TermClose => {
+                if let Some((addr, id)) = &self.term
+                    && let Some(t) = self.target(addr)
+                {
+                    return Task::perform(direct::terminal_close(t, *id), Message::TermSent);
+                }
+            }
             Message::KillDone(r) => {
                 self.kill_notice = Some(r);
                 if let Some(addr) = self.direct_selected.clone() {
@@ -1586,7 +1687,12 @@ impl Console {
         } else {
             Subscription::none()
         };
-        let direct_tick = Subscription::batch([direct_tick, cmd_tick]);
+        let term_tick = if self.term.is_some() && self.term_exited.is_none() {
+            iced::time::every(Duration::from_millis(500)).map(|_| Message::TermPoll)
+        } else {
+            Subscription::none()
+        };
+        let direct_tick = Subscription::batch([direct_tick, cmd_tick, term_tick]);
         if self.settings.token.is_empty() {
             return direct_tick;
         }
@@ -1993,6 +2099,7 @@ impl Console {
                             DirectTab::Peripherals => self.periph_view(),
                             DirectTab::Updates => self.updates_view(),
                             DirectTab::Wmi => self.wmi_view(),
+                            DirectTab::Terminal => self.term_view(),
                         };
                         column![
                             row![
@@ -2007,7 +2114,8 @@ impl Console {
                                 tab("Files", DirectTab::Files),
                                 tab("Printers & drives", DirectTab::Peripherals),
                                 tab("Updates", DirectTab::Updates),
-                                tab("WMI", DirectTab::Wmi)
+                                tab("WMI", DirectTab::Wmi),
+                                tab("Terminal", DirectTab::Terminal)
                             ]
                             .spacing(6),
                             body
@@ -2034,6 +2142,72 @@ impl Console {
             }
         };
         column![top, content].spacing(12).into()
+    }
+
+    fn term_view(&self) -> Element<'_, Message> {
+        let open = self.term.is_some() && self.term_exited.is_none();
+        let controls = row![
+            pick_list(
+                SHELLS,
+                Some(ShellChoice(self.term_shell)),
+                Message::TermShell
+            )
+            .text_size(13),
+            button(text("Open terminal"))
+                .style(button::primary)
+                .on_press_maybe((!open).then_some(Message::TermOpen)),
+            button(text("Close"))
+                .style(button::danger)
+                .on_press_maybe(open.then_some(Message::TermClose)),
+            Space::new().width(Length::Fill),
+            text(match self.term_exited {
+                Some(Some(c)) => format!("exited (code {c})"),
+                Some(None) => "closed".to_string(),
+                None if open => "connected".to_string(),
+                None => String::new(),
+            })
+            .size(12)
+            .style(text::secondary),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        let mut col = column![
+            text("An interactive shell as the agent's account (LocalSystem when installed as the service). Type one command per line; input is logged on the agent by hash, not content. Idle terminals close after 15 minutes.")
+                .size(12)
+                .style(text::secondary),
+            controls,
+        ]
+        .spacing(8);
+        if let Some(n) = &self.term_notice {
+            col = col.push(text(n.clone()).size(13).style(text::danger));
+        }
+        col.push(
+            container(
+                scrollable(text(&self.term_text).size(12).font(iced::Font::MONOSPACE))
+                    .anchor_bottom()
+                    .height(Length::Fill)
+                    .width(Length::Fill),
+            )
+            .padding(8)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(container::bordered_box),
+        )
+        .push(
+            text_input(
+                if open {
+                    "Type a command and press Enter"
+                } else {
+                    "Open a terminal first"
+                },
+                &self.term_input,
+            )
+            .on_input_maybe(open.then_some(Message::TermInput))
+            .on_submit(Message::TermSend)
+            .font(iced::Font::MONOSPACE)
+            .padding(8),
+        )
+        .into()
     }
 
     fn updates_view(&self) -> Element<'_, Message> {

@@ -36,7 +36,7 @@ pub struct Jobs {
     jobs: Mutex<HashMap<Uuid, Arc<Mutex<Job>>>>,
 }
 
-fn system32(exe: &str) -> PathBuf {
+pub(crate) fn system32(exe: &str) -> PathBuf {
     // Full paths so a planted binary on PATH can never run with the agent's rights.
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
     PathBuf::from(root).join("System32").join(exe)
@@ -286,6 +286,8 @@ async fn run(
     }
     finish(&job, state, code, None);
 }
+
+pub(crate) use platform::KillTree;
 
 #[cfg(windows)]
 mod platform {

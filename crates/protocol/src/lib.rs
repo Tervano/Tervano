@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.14";
+pub const PROTOCOL_VERSION: &str = "1.15";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -630,6 +630,38 @@ pub struct InventoryReport {
     pub collected_at: Millis,
     pub hardware: HardwareInventory,
     pub software: SoftwareInventory,
+}
+
+/// Body of `POST /v1/terminal`: open an interactive shell as the agent's account.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalStart {
+    pub shell: Shell,
+}
+
+/// Body of `POST /v1/terminal/{id}/input`: bytes for the shell's stdin (include the newline).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalInput {
+    pub text: String,
+}
+
+/// `GET /v1/terminal/{id}/output?since=N`: output from absolute offset `since`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TerminalOutput {
+    pub id: Uuid,
+    pub output: String,
+    /// Pass as `since` next time.
+    pub next: u64,
+    /// Output older than the agent's buffer (256 KiB) was dropped before `since`.
+    pub skipped: bool,
+    pub exited: bool,
+    pub exit_code: Option<i32>,
+}
+
+/// Query of `GET /v1/terminal/{id}/output`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TerminalSince {
+    #[serde(default)]
+    pub since: u64,
 }
 
 /// SSE event names on `GET /api/v1/stream`.

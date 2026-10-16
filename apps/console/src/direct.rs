@@ -632,3 +632,46 @@ pub async fn wmi_classes(t: Target, namespace: String) -> Result<Vec<String>, St
 pub async fn updates(t: Target) -> Result<UpdateStatus, String> {
     json(send(&t, |c, base| c.get(format!("{base}/v1/updates"))).await?).await
 }
+
+pub async fn terminal_open(t: Target, shell: Shell) -> Result<TerminalOutput, String> {
+    json(
+        send(&t, |c, base| {
+            c.post(format!("{base}/v1/terminal"))
+                .json(&TerminalStart { shell })
+        })
+        .await?,
+    )
+    .await
+}
+
+pub async fn terminal_input(t: Target, id: uuid::Uuid, text: String) -> Result<(), String> {
+    send(&t, |c, base| {
+        c.post(format!("{base}/v1/terminal/{id}/input"))
+            .json(&TerminalInput { text })
+    })
+    .await
+    .map(|_| ())
+}
+
+pub async fn terminal_output(
+    t: Target,
+    id: uuid::Uuid,
+    since: u64,
+) -> Result<TerminalOutput, String> {
+    json(
+        send(&t, |c, base| {
+            c.get(format!("{base}/v1/terminal/{id}/output"))
+                .query(&TerminalSince { since })
+        })
+        .await?,
+    )
+    .await
+}
+
+pub async fn terminal_close(t: Target, id: uuid::Uuid) -> Result<(), String> {
+    send(&t, |c, base| {
+        c.post(format!("{base}/v1/terminal/{id}/close"))
+    })
+    .await
+    .map(|_| ())
+}
