@@ -42,6 +42,8 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Agent | Report hostname, OS, IPs, signed-in users | Implemented | Windows | Verified on Windows 11 Home 25H2 (build 26200), workgroup machine. Not yet tested domain-joined |
 | Agent | Change detection | Partial | Windows | Poll-and-diff every `poll_secs`; event-driven notifications are T-209/T-210 |
 | Server | Device index + search | Implemented | Win/Linux | Prefix search by hostname, username, `DOMAIN\user`, IP. Tests: [api.rs](apps/server/tests/api.rs). Not yet benchmarked (T-112) |
+| Server | Device decommission | Implemented | Win/Linux | `tervano-server device list` / `device revoke --id`; audited |
+| Agent | Resource use | Measured | Windows | Idle release build: ~30 MB working set, ~9 MB private, ≈0.01% of one core (T-214) |
 | Server | Online/offline tracking | Implemented | Win/Linux | Heartbeat timeout + immediate offline on agent shutdown |
 | Server | Device event history | Implemented | Win/Linux | Authenticated `GET /api/v1/devices/{id}/events`, newest first with `before` and `limit` (max 100). Startup/state/shutdown events only; heartbeat excluded. Rows older than `event_retention_days` (default 30) are purged at startup and hourly, including existing old rows on upgrade |
 | Server | Metrics | Implemented | Win/Linux | Authenticated Prometheus text at `GET /metrics`: accepted agent events since process start, device counts, and retained event rows. No device identifiers or user data in metrics |

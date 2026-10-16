@@ -35,6 +35,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TechCmd,
     },
+    /// Enrolled devices.
+    Device {
+        #[command(subcommand)]
+        cmd: DeviceCmd,
+    },
     /// Export or archive the append-only audit trail.
     Audit {
         #[command(subcommand)]
@@ -79,6 +84,17 @@ enum TechCmd {
     Revoke {
         #[arg(long)]
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum DeviceCmd {
+    /// List enrolled devices (including revoked ones).
+    List,
+    /// Decommission a device: its credentials stop working and it leaves search results.
+    Revoke {
+        #[arg(long)]
+        id: uuid::Uuid,
     },
 }
 
@@ -258,6 +274,22 @@ async fn main() -> anyhow::Result<()> {
         } => {
             revoke_technician(&db, &name, &cli_actor()).await?;
             println!("revoked {name}");
+        }
+        Cmd::Device {
+            cmd: DeviceCmd::List,
+        } => {
+            for (id, hostname, last_seen, revoked) in tervano_server::list_devices(&db).await? {
+                println!(
+                    "{id}  {hostname:<24} last_seen={last_seen}{}",
+                    if revoked { "  REVOKED" } else { "" }
+                );
+            }
+        }
+        Cmd::Device {
+            cmd: DeviceCmd::Revoke { id },
+        } => {
+            let hostname = tervano_server::revoke_device(&db, id, &cli_actor()).await?;
+            println!("revoked {hostname} ({id}); it must re-enroll with a new token to return");
         }
         Cmd::Audit {
             cmd: AuditCmd::Export { out },

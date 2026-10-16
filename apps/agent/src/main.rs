@@ -4,6 +4,7 @@ mod eventlog;
 mod exec;
 mod files;
 mod inventory;
+mod netwatch;
 mod peripherals;
 mod processes;
 #[cfg(windows)]
@@ -236,6 +237,14 @@ async fn sleep_or_stop(d: Duration, stop: &mut watch::Receiver<bool>) -> bool {
     }
 }
 
+/// Scales `d` by a random factor in [1 - spread, 1 + spread] so thousands of agents that
+/// restarted together (or lost the server together) don't hit it in lockstep.
+fn jitter(d: Duration, spread: f64) -> Duration {
+    // uuid v4 is already a dependency and draws from the OS RNG; no extra crate needed.
+    let r = (uuid::Uuid::new_v4().as_u128() % 10_000) as f64 / 10_000.0; // [0, 1)
+    d.mul_f64(1.0 - spread + 2.0 * spread * r)
+}
+
 /// Runs the configured roles (server reporting and/or direct management) until `stop` fires.
 /// A failure in either is fatal so misconfiguration is loud rather than half-working.
 pub async fn run(cfg: Config, stop: watch::Receiver<bool>) -> anyhow::Result<()> {
@@ -308,6 +317,10 @@ async fn report(
     let mut first = true;
     let mut backoff = poll;
     let mut next_inventory = std::time::Instant::now();
+    // Next heartbeat is due after a jittered interval, re-drawn after every send.
+    let mut heartbeat_every = jitter(Duration::from_secs(cfg.heartbeat_secs), 0.1);
+    let net_changed = std::sync::Arc::new(tokio::sync::Notify::new());
+    let _net_watch = netwatch::watch(net_changed.clone());
 
     loop {
         let state = collect::device_state();
@@ -322,9 +335,7 @@ async fn report(
                     state: state.clone(),
                 }
             });
-        } else if pending.is_none()
-            && last_sent.elapsed() >= Duration::from_secs(cfg.heartbeat_secs)
-        {
+        } else if pending.is_none() && last_sent.elapsed() >= heartbeat_every {
             pending = Some(EventKind::Heartbeat);
         }
 
@@ -364,11 +375,18 @@ async fn report(
                     }
                     first = false;
                     last_sent = std::time::Instant::now();
+                    heartbeat_every = jitter(Duration::from_secs(cfg.heartbeat_secs), 0.1);
                     backoff = poll;
                 }
                 Err(e) => {
-                    tracing::warn!("report failed: {e:#}; retrying in {backoff:?}");
-                    wait = backoff;
+                    if e.to_string().contains("401") {
+                        tracing::error!(
+                            "server rejected this device's identity (revoked or unknown); delete identity.json and re-enroll with a new token"
+                        );
+                    }
+                    // Equal jitter: half fixed, half random, so a reconnect storm spreads out.
+                    wait = jitter(backoff, 0.5);
+                    tracing::warn!("report failed: {e:#}; retrying in {wait:?}");
                     backoff = (backoff * 2).min(max_backoff);
                 }
             }
@@ -396,8 +414,17 @@ async fn report(
                     }
                 };
         }
-        if !sleep_or_stop(wait, &mut stop).await {
-            break;
+        let woke_by_network = tokio::select! {
+            _ = tokio::time::sleep(wait) => false,
+            _ = stop.changed() => break,
+            _ = net_changed.notified() => true,
+        };
+        if woke_by_network {
+            // Address changes arrive in bursts (DHCP, IPv6 privacy addresses); let them settle.
+            tracing::info!("network change detected");
+            if !sleep_or_stop(Duration::from_secs(2), &mut stop).await {
+                break;
+            }
         }
     }
 

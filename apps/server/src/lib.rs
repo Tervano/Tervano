@@ -419,6 +419,52 @@ pub async fn rotate_technician(
 }
 
 /// Invalidates a technician token. The audit row and revocation commit together.
+/// One enrolled device as the CLI lists it: (id, hostname, last_seen ms, revoked).
+pub async fn list_devices(db: &SqlitePool) -> anyhow::Result<Vec<(String, String, i64, bool)>> {
+    let rows = sqlx::query(
+        "SELECT id, hostname, last_seen, revoked FROM devices ORDER BY hostname COLLATE NOCASE",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            (
+                r.get("id"),
+                r.get("hostname"),
+                r.get("last_seen"),
+                r.get::<i64, _>("revoked") != 0,
+            )
+        })
+        .collect())
+}
+
+/// Decommissions a device: its secret stops working, it disappears from search, and its
+/// events/inventory are no longer accepted. The agent must re-enroll with a new token to return.
+pub async fn revoke_device(db: &SqlitePool, id: Uuid, actor: &str) -> anyhow::Result<String> {
+    let mut tx = db.begin().await?;
+    let hostname: Option<String> =
+        sqlx::query_scalar("SELECT hostname FROM devices WHERE id = ? AND revoked = 0")
+            .bind(id.to_string())
+            .fetch_optional(&mut *tx)
+            .await?;
+    let hostname =
+        hostname.ok_or_else(|| anyhow::anyhow!("device not found or already revoked"))?;
+    sqlx::query("UPDATE devices SET revoked = 1 WHERE id = ?")
+        .bind(id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO audit_log (at, actor, action, target, ok, detail) VALUES (?, ?, 'device.revoke', ?, 1, ?)")
+        .bind(now_millis())
+        .bind(actor)
+        .bind(id.to_string())
+        .bind(&hostname)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(hostname)
+}
+
 pub async fn revoke_technician(db: &SqlitePool, name: &str, actor: &str) -> anyhow::Result<()> {
     validate_technician_name(name)?;
     let now = now_millis();
