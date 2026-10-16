@@ -18,3 +18,8 @@ enrollments_per_minute = 60
 # TLS key) and lifetime, i.e. how long granted direct access survives a Server outage (5-1440 min).
 # ticket_key = 'ticket-key.pk8'
 # ticket_minutes = 480
+# Device certificates (mutual TLS for agents; needs tls_cert/tls_key). The device CA is created here on
+# first start; it is not the CA from `cert init`. Protect its key like a TLS key.
+# device_ca_dir = 'device-ca'
+# device_cert_days = 90          # agents renew when a third is left
+# require_device_certs = false   # true: devices without a certificate are refused (they can still get one)

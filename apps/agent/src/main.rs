@@ -1,4 +1,5 @@
 mod collect;
+mod devcert;
 mod direct;
 mod eventlog;
 mod exec;
@@ -172,39 +173,98 @@ impl Identity {
 
 #[derive(Clone)]
 struct Client {
-    http: reqwest::Client,
+    /// Shared by every clone (report loop, server jobs), so a new device certificate applies to all.
+    http: std::sync::Arc<std::sync::RwLock<reqwest::Client>>,
     base: String,
+    ca_pem: Option<Vec<u8>>,
 }
 
 impl Client {
     fn new(base: &str, ca_cert: Option<&std::path::Path>) -> anyhow::Result<Self> {
+        let ca_pem = ca_cert
+            .map(|path| {
+                std::fs::read(path).with_context(|| format!("reading ca_cert {}", path.display()))
+            })
+            .transpose()?;
+        let base = base.trim_end_matches('/').to_owned();
+        let http = Self::build(&base, ca_pem.as_deref(), None)?;
+        Ok(Self {
+            http: std::sync::Arc::new(std::sync::RwLock::new(http)),
+            base,
+            ca_pem,
+        })
+    }
+
+    fn build(
+        base: &str,
+        ca_pem: Option<&[u8]>,
+        identity_pem: Option<&str>,
+    ) -> anyhow::Result<reqwest::Client> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(PROTOCOL_HEADER, PROTOCOL_VERSION.parse()?);
         let mut builder = reqwest::Client::builder();
-        if let Some(path) = ca_cert {
-            let pem = std::fs::read(path)
-                .with_context(|| format!("reading ca_cert {}", path.display()))?;
-            builder = builder.add_root_certificate(reqwest::Certificate::from_pem(&pem)?);
+        if let Some(pem) = ca_pem {
+            builder = builder.add_root_certificate(reqwest::Certificate::from_pem(pem)?);
         }
-        let http = builder
+        if let Some(pem) = identity_pem {
+            builder = builder.identity(reqwest::Identity::from_pem(pem.as_bytes())?);
+        }
+        Ok(builder
             .https_only(!base.starts_with("http://"))
             .default_headers(headers)
             .timeout(Duration::from_secs(20))
             .user_agent(concat!("TervanoAgent/", env!("CARGO_PKG_VERSION")))
-            .build()?;
-        Ok(Self {
-            http,
-            base: base.trim_end_matches('/').to_owned(),
-        })
+            .build()?)
     }
 
-    async fn enroll(&self, token: &str, state: &DeviceState) -> anyhow::Result<EnrollResponse> {
+    fn http(&self) -> reqwest::Client {
+        self.http.read().expect("not poisoned").clone()
+    }
+
+    /// Presents this device certificate on every later request (mutual TLS, T-808).
+    fn set_identity(&self, identity_pem: &str) -> anyhow::Result<()> {
+        let http = Self::build(&self.base, self.ca_pem.as_deref(), Some(identity_pem))?;
+        *self.http.write().expect("not poisoned") = http;
+        Ok(())
+    }
+
+    /// Device certificates only exist over TLS.
+    fn tls(&self) -> bool {
+        self.base.starts_with("https://")
+    }
+
+    /// Issues or renews the device certificate; `None` when the Server does not offer them.
+    async fn request_cert(
+        &self,
+        secret: &str,
+        csr: &str,
+    ) -> anyhow::Result<Option<DeviceCertResponse>> {
         let res = self
-            .http
+            .http()
+            .post(format!("{}/api/v1/device/certificate", self.base))
+            .bearer_auth(secret)
+            .json(&DeviceCertRequest { csr: csr.into() })
+            .send()
+            .await?;
+        if res.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            return Ok(None);
+        }
+        Ok(Some(check(res).await?.json().await?))
+    }
+
+    async fn enroll(
+        &self,
+        token: &str,
+        state: &DeviceState,
+        csr: Option<String>,
+    ) -> anyhow::Result<EnrollResponse> {
+        let res = self
+            .http()
             .post(format!("{}/api/v1/enroll", self.base))
             .json(&EnrollRequest {
                 token: token.into(),
                 state: state.clone(),
+                csr,
             })
             .send()
             .await?;
@@ -213,7 +273,7 @@ impl Client {
 
     async fn send(&self, secret: &str, events: &[AgentEvent]) -> anyhow::Result<EventAck> {
         let res = self
-            .http
+            .http()
             .post(format!("{}/api/v1/events", self.base))
             .bearer_auth(secret)
             .json(events)
@@ -224,7 +284,7 @@ impl Client {
 
     async fn send_inventory(&self, secret: &str, report: &InventoryReport) -> anyhow::Result<()> {
         let res = self
-            .http
+            .http()
             .post(format!("{}/api/v1/inventory", self.base))
             .bearer_auth(secret)
             .json(report)
@@ -236,7 +296,7 @@ impl Client {
     /// The next server job for this device, if any.
     async fn claim_job(&self, secret: &str) -> anyhow::Result<Option<AgentJob>> {
         let res = self
-            .http
+            .http()
             .post(format!("{}/api/v1/agent/jobs/claim", self.base))
             .bearer_auth(secret)
             .send()
@@ -251,7 +311,7 @@ impl Client {
     /// Running-job check-in; the reply says whether the job was cancelled.
     async fn job_progress(&self, secret: &str, id: uuid::Uuid) -> anyhow::Result<JobControl> {
         let res = self
-            .http
+            .http()
             .post(format!("{}/api/v1/agent/jobs/{id}/progress", self.base))
             .bearer_auth(secret)
             .send()
@@ -261,13 +321,95 @@ impl Client {
 
     async fn job_result(&self, secret: &str, id: uuid::Uuid, r: &JobResult) -> anyhow::Result<()> {
         let res = self
-            .http
+            .http()
             .post(format!("{}/api/v1/agent/jobs/{id}/result", self.base))
             .bearer_auth(secret)
             .json(r)
             .send()
             .await?;
         check(res).await.map(|_| ())
+    }
+}
+
+/// Loads this device's certificate into the client, and obtains or renews it when needed. Returns
+/// when to check again. Without TLS (loopback development) there are no device certificates.
+async fn ensure_device_cert(
+    client: &Client,
+    identity: &Identity,
+    state_dir: &std::path::Path,
+) -> Duration {
+    const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+    const RETRY: Duration = Duration::from_secs(15 * 60);
+    if !client.tls() {
+        return CHECK_EVERY;
+    }
+    let renewing = match devcert::load(state_dir) {
+        Ok(Some(c)) => {
+            if let Err(e) = client.set_identity(&c.identity_pem) {
+                tracing::error!("device certificate unusable: {e:#}");
+            }
+            if !c.renew_due {
+                return CHECK_EVERY;
+            }
+            tracing::info!(expires_at = c.expires_at, "renewing the device certificate");
+            true
+        }
+        Ok(None) => false,
+        Err(e) => {
+            tracing::error!(
+                "device certificate unreadable ({e:#}); if the Server already registered one for \
+                 this device, re-enroll (delete identity.json and set a new enrollment token)"
+            );
+            false
+        }
+    };
+    let pending = match devcert::new_request() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("cannot create a device key: {e:#}");
+            return RETRY;
+        }
+    };
+    match client
+        .request_cert(&identity.device_secret, &pending.csr)
+        .await
+    {
+        Ok(Some(resp)) => match pending
+            .complete(state_dir, &resp.certificate)
+            .and_then(|pem| client.set_identity(&pem))
+        {
+            Ok(()) => {
+                tracing::info!(
+                    expires_at = resp.expires_at,
+                    "device certificate {}",
+                    if renewing { "renewed" } else { "issued" }
+                );
+                CHECK_EVERY
+            }
+            Err(e) => {
+                tracing::error!("storing the device certificate failed: {e:#}");
+                RETRY
+            }
+        },
+        Ok(None) => {
+            tracing::debug!("the Server does not issue device certificates");
+            CHECK_EVERY
+        }
+        Err(e)
+            if e.to_string()
+                .contains("must present its device certificate") =>
+        {
+            tracing::error!(
+                "the Server has a device certificate registered for this device that is missing \
+                 here (state directory restored or copied?); re-enroll: delete identity.json and \
+                 set a new enrollment_token"
+            );
+            RETRY
+        }
+        Err(e) => {
+            tracing::warn!("device certificate request failed: {e:#}; retrying in 15 min");
+            RETRY
+        }
     }
 }
 
@@ -381,9 +523,19 @@ async fn report(
                 "not enrolled and no enrollment_token configured"
             );
             let mut backoff = poll;
+            // Over TLS the device key is made here and only its CSR is sent (T-808).
+            let mut pending = if client.tls() {
+                Some(devcert::new_request()?)
+            } else {
+                None
+            };
             loop {
                 match client
-                    .enroll(&cfg.enrollment_token, &collect::device_state())
+                    .enroll(
+                        &cfg.enrollment_token,
+                        &collect::device_state(),
+                        pending.as_ref().map(|p| p.csr.clone()),
+                    )
                     .await
                 {
                     Ok(r) => {
@@ -392,6 +544,10 @@ async fn report(
                             device_secret: r.device_secret,
                         };
                         id.save(&id_path)?;
+                        if let (Some(p), Some(cert)) = (pending.take(), r.certificate) {
+                            client.set_identity(&p.complete(&cfg.state_dir, &cert)?)?;
+                            tracing::info!("device certificate issued at enrollment");
+                        }
                         clear_enrollment_token(cfg);
                         tracing::info!(device = %id.device_id, "enrolled");
                         break id;
@@ -406,6 +562,9 @@ async fn report(
         }
     };
     tracing::info!(device = %identity.device_id, server = %server_url, "reporting to server");
+    // Before anything else, so a device with a registered certificate presents it from the start.
+    let mut next_cert_check =
+        std::time::Instant::now() + ensure_device_cert(&client, &identity, &cfg.state_dir).await;
     // Enabled: picked up within a poll; disabled: claimed (and refused) once per heartbeat.
     let job_poll = if cfg.server_jobs.enabled {
         poll
@@ -531,6 +690,10 @@ async fn report(
                     backoff = (backoff * 2).min(max_backoff);
                 }
             }
+        }
+        if std::time::Instant::now() >= next_cert_check {
+            next_cert_check = std::time::Instant::now()
+                + ensure_device_cert(&client, &identity, &cfg.state_dir).await;
         }
         // Only once the server knows this device (an event of this run was accepted).
         if delivered && std::time::Instant::now() >= next_inventory {

@@ -35,7 +35,7 @@ Status labels: Implemented · Partial · In progress · Planned · Blocked · Un
 | Category | Feature | Status | Platform | Notes |
 |---|---|---|---|---|
 | Agent | Background service | Partial | Windows | SCM install/run implemented ([service.rs](apps/agent/src/service.rs)); foreground mode verified on Win 11 25H2; service mode not yet verified end-to-end |
-| Agent | Secure enrollment | Partial | Windows | One-time/N-use expiring tokens over TLS; device secret DPAPI-protected on the agent. Mutual TLS device identity is T-808 |
+| Agent | Secure enrollment | Implemented | Windows | One-time/N-use expiring tokens over TLS; device secret DPAPI-protected on the agent; over TLS each device also gets a client certificate for its own on-device key (mutual TLS), renewed automatically |
 | Server | TLS | Implemented | Win/Linux | rustls; plaintext only on loopback. `tervano-server cert init` creates a private CA + server cert |
 | Server | Audit log | Partial | Win/Linux | Append-only (DB triggers); enrollments, auth failures, token/technician creation and lifecycle. `GET /api/v1/audit` includes socket peer IP for HTTP events; behind a proxy this is the proxy IP |
 | Server | Technician API tokens | Partial | Win/Linux | New tokens expire after 30 days by default; `tech rotate` replaces the old token and `tech revoke` disables it. CLI management only; direct-channel certificate lifecycle remains separate work |
@@ -166,7 +166,7 @@ Phases from [PLAN.md](PLAN.md) §16, summarized in [docs/roadmap.md](docs/roadma
 
 ## Security & privacy
 
-Intended model (PLAN §12): mutual authentication, TLS everywhere, per-operation authorization enforced on the agent, append-only audit, mandatory visible notification for any interactive remote session, classroom recording off by default. **Today** the Server uses TLS off loopback, bearer-token authentication, hashed secrets, and a limited append-only audit log. The Windows Agent protects its device secret with DPAPI; direct Console→Agent connections use mutual TLS and a pinned Agent certificate. Server technicians have roles (viewer, operator, admin) and optional device scopes; mutual TLS device identity to the Server remains planned. See the [current security model](docs/security-model.md) for trust boundaries and known gaps. Report vulnerabilities through the private path in [SECURITY.md](SECURITY.md).
+Intended model (PLAN §12): mutual authentication, TLS everywhere, per-operation authorization enforced on the agent, append-only audit, mandatory visible notification for any interactive remote session, classroom recording off by default. **Today** the Server uses TLS off loopback, bearer-token authentication, hashed secrets, and a limited append-only audit log. The Windows Agent protects its device secret with DPAPI; direct Console→Agent connections use mutual TLS and a pinned Agent certificate. Server technicians have roles (viewer, operator, admin) and optional device scopes; over TLS, agents authenticate to the Server with a device certificate (mutual TLS) as well as their secret. See the [current security model](docs/security-model.md) for trust boundaries and known gaps. Report vulnerabilities through the private path in [SECURITY.md](SECURITY.md).
 
 ## License
 

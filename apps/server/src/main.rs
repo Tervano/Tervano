@@ -291,6 +291,27 @@ async fn main() -> anyhow::Result<()> {
                 key,
                 cfg.ticket_minutes,
             ));
+            // Device certificates need the TLS listener (client certificates are a TLS feature).
+            let device_ca = match &cfg.tls_cert {
+                Some(_) => Some(std::sync::Arc::new(
+                    tervano_server::device_certs::DeviceCa::load_or_create(
+                        &cfg.device_ca_dir,
+                        cfg.device_cert_days,
+                    )?,
+                )),
+                None => None,
+            };
+            let state = match &device_ca {
+                Some(ca) => {
+                    tracing::info!(
+                        days = cfg.device_cert_days,
+                        required = cfg.require_device_certs,
+                        "device certificates enabled"
+                    );
+                    state.with_device_ca(ca.clone(), cfg.require_device_certs)
+                }
+                None => state,
+            };
             spawn_offline_sweeper(state.clone());
             spawn_query_group_refresher(state.db.clone());
             spawn_event_purger(state.db.clone(), cfg.event_retention_days);
@@ -307,11 +328,18 @@ async fn main() -> anyhow::Result<()> {
                     rustls::crypto::ring::default_provider()
                         .install_default()
                         .map_err(|_| anyhow::anyhow!("rustls provider already installed"))?;
-                    let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("loading TLS cert/key: {e}"))?;
+                    let tls = axum_server::tls_rustls::RustlsConfig::from_config(
+                        std::sync::Arc::new(tervano_server::device_certs::tls_config(
+                            cert,
+                            key,
+                            device_ca.as_deref(),
+                        )?),
+                    );
                     tracing::info!("tervano-server listening on https://{addr}");
-                    axum_server::bind_rustls(addr, tls)
+                    axum_server::bind(addr)
+                        .acceptor(tervano_server::device_certs::ClientCertAcceptor(
+                            axum_server::tls_rustls::RustlsAcceptor::new(tls),
+                        ))
                         .handle(handle)
                         .serve(router)
                         .await?;

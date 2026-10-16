@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// `major.minor`. Bump minor for additive changes, major for breaking ones.
-pub const PROTOCOL_VERSION: &str = "1.23";
+pub const PROTOCOL_VERSION: &str = "1.24";
 pub const PROTOCOL_HEADER: &str = "x-tervano-protocol";
 
 /// True when `other` (a `major.minor` string) is wire-compatible with ours.
@@ -93,6 +93,9 @@ pub struct DeviceState {
 pub struct EnrollRequest {
     pub token: String,
     pub state: DeviceState,
+    /// PEM certificate request for the device's own key (T-808); signed when the Server runs TLS.
+    #[serde(default)]
+    pub csr: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +103,23 @@ pub struct EnrollResponse {
     pub device_id: Uuid,
     /// Bearer secret for this device. Shown once; the server stores only its hash.
     pub device_secret: String,
+    /// Device client certificate (leaf + device CA, PEM) when a CSR was sent and the Server runs
+    /// TLS. Once issued, the device must present it on every request.
+    #[serde(default)]
+    pub certificate: Option<String>,
+}
+
+/// Body of `POST /api/v1/device/certificate`: a new CSR to (re)issue the device certificate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceCertRequest {
+    pub csr: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceCertResponse {
+    /// Leaf + device CA, PEM.
+    pub certificate: String,
+    pub expires_at: Millis,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

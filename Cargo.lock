@@ -4655,6 +4655,7 @@ dependencies = [
  "sqlx",
  "tervano-protocol",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "toml",
  "tower",

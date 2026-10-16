@@ -2,6 +2,7 @@
 
 pub mod audit_archive;
 mod compliance;
+pub mod device_certs;
 mod facts;
 mod groups;
 mod rbac;
@@ -54,6 +55,13 @@ pub struct Config {
     pub ticket_key: std::path::PathBuf,
     /// Lifetime of a connection ticket: how long direct access survives a Server outage.
     pub ticket_minutes: u32,
+    /// Directory of the device CA that signs agents' client certificates (created on first start
+    /// with TLS). Kept apart from the CA of the Server and technician certificates.
+    pub device_ca_dir: std::path::PathBuf,
+    /// Lifetime of a device certificate; agents renew when a third of it is left.
+    pub device_cert_days: u32,
+    /// Refuse devices without a certificate (they can still request one).
+    pub require_device_certs: bool,
 }
 
 impl Default for Config {
@@ -71,6 +79,9 @@ impl Default for Config {
             tls_key: None,
             ticket_key: "ticket-key.pk8".into(),
             ticket_minutes: 480,
+            device_ca_dir: "device-ca".into(),
+            device_cert_days: 90,
+            require_device_certs: false,
         }
     }
 }
@@ -92,6 +103,17 @@ impl Config {
         anyhow::ensure!(
             self.offline_after_secs >= 10,
             "offline_after_secs must be >= 10"
+        );
+        anyhow::ensure!(
+            (device_certs::MIN_CERT_DAYS..=device_certs::MAX_CERT_DAYS)
+                .contains(&self.device_cert_days),
+            "device_cert_days must be {}-{}",
+            device_certs::MIN_CERT_DAYS,
+            device_certs::MAX_CERT_DAYS
+        );
+        anyhow::ensure!(
+            !self.require_device_certs || self.tls_cert.is_some(),
+            "require_device_certs needs TLS (tls_cert/tls_key)"
         );
         anyhow::ensure!(
             (tickets::MIN_TICKET_MINUTES..=tickets::MAX_TICKET_MINUTES)
@@ -136,6 +158,9 @@ pub struct AppState {
     limits: Arc<RequestLimits>,
     /// `None`: tickets are not offered (503).
     tickets: Option<Arc<tickets::TicketSigner>>,
+    /// `None` without TLS: no device certificates.
+    device_ca: Option<Arc<device_certs::DeviceCa>>,
+    require_device_certs: bool,
 }
 
 const MAX_API_BODY: usize = 256 * 1024;
@@ -251,7 +276,16 @@ impl AppState {
                 enrollments_per_minute,
             )),
             tickets: None,
+            device_ca: None,
+            require_device_certs: false,
         }
+    }
+
+    /// Enables device certificates (T-808); the listener must use [`device_certs::tls_config`].
+    pub fn with_device_ca(mut self, ca: Arc<device_certs::DeviceCa>, require: bool) -> Self {
+        self.device_ca = Some(ca);
+        self.require_device_certs = require;
+        self
     }
 
     /// Enables connection tickets (T-403).
@@ -561,6 +595,7 @@ pub fn app(state: AppState) -> Router {
             "/inventory",
             post(ingest_inventory).layer(axum::extract::DefaultBodyLimit::max(MAX_INVENTORY_BODY)),
         )
+        .route("/device/certificate", post(device_certs::issue))
         .route("/devices/{id}/inventory", get(device_inventory))
         .route("/devices/{id}/ticket", post(tickets::issue))
         .route("/devices", get(search_devices))
@@ -759,15 +794,8 @@ pub struct DeviceAuth {
 impl FromRequestParts<AppState> for DeviceAuth {
     type Rejection = AppError;
     async fn from_request_parts(parts: &mut Parts, s: &AppState) -> Result<Self, Self::Rejection> {
-        let unauthorized =
-            || AppError::new(err(StatusCode::UNAUTHORIZED, "invalid device credentials"));
-        let secret = bearer(parts).ok_or_else(unauthorized)?;
-        let id: Option<String> =
-            sqlx::query_scalar("SELECT id FROM devices WHERE secret_hash = ? AND revoked = 0")
-                .bind(hash_secret(secret))
-                .fetch_optional(&s.db)
-                .await?;
-        id.map(|id| DeviceAuth { id }).ok_or_else(unauthorized)
+        let (id, _) = device_certs::device_auth(parts, s, false).await?;
+        Ok(DeviceAuth { id })
     }
 }
 
@@ -900,8 +928,18 @@ async fn enroll(
     }
     let id = Uuid::new_v4();
     let secret = new_secret();
+    // A bad CSR fails the enrollment before anything is stored (the token is not consumed).
+    let cert = match (&req.csr, &s.device_ca) {
+        (Some(csr), Some(ca)) => Some(
+            ca.sign(csr, id)
+                .map_err(|e| AppError::new(err(StatusCode::BAD_REQUEST, e)))?,
+        ),
+        _ => None,
+    };
     sqlx::query(
-        "INSERT INTO devices (id, secret_hash, hostname, os, enrolled_at, last_seen, state_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO devices (id, secret_hash, hostname, os, enrolled_at, last_seen, state_json,
+             cert_sha256, cert_expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(hash_secret(&secret))
@@ -910,6 +948,8 @@ async fn enroll(
     .bind(now)
     .bind(now)
     .bind(serde_json::to_string(&req.state).expect("state serializes"))
+    .bind(cert.as_ref().map(|c| c.1.as_str()))
+    .bind(cert.as_ref().map(|c| c.2))
     .execute(&mut *tx)
     .await?;
     write_projections(&mut tx, &id.to_string(), &req.state).await?;
@@ -930,6 +970,7 @@ async fn enroll(
     Ok(Json(EnrollResponse {
         device_id: id,
         device_secret: secret,
+        certificate: cert.map(|c| c.0),
     }))
 }
 
