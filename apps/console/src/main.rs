@@ -1583,7 +1583,17 @@ impl Console {
             }
             Message::FilesLoaded(address, r) => {
                 if self.direct_selected.as_deref() == Some(address.as_str()) {
+                    // The periodic refresh reloads the same folder: keep the scroll position.
+                    let path = |f: &Option<(String, Result<DirListing, String>)>| {
+                        f.as_ref()
+                            .and_then(|(_, r)| r.as_ref().ok())
+                            .map(|l| l.path.clone())
+                    };
+                    let new_folder = path(&self.files) != r.as_ref().ok().map(|l| l.path.clone());
                     self.files = Some((address, r));
+                    if new_folder {
+                        return self.reset_table(reports::TableId::Files);
+                    }
                 }
             }
             Message::FilesDownload(name) => {
@@ -2003,7 +2013,7 @@ impl Console {
         }
         if self.dirty {
             // Debounce: a burst of pushed changes becomes one refresh.
-            // shortcut: re-runs the whole current search per burst; patch rows in place if this gets heavy (T-816).
+            // shortcut: re-runs the whole current search per burst; patch rows in place if this gets heavy (T-817).
             subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Refresh));
         } else if !self.live {
             subs.push(iced::time::every(Duration::from_secs(15)).map(|_| Message::Refresh));
@@ -2134,7 +2144,7 @@ impl Console {
                 ]
                 .spacing(8)
                 .padding([6, 10]);
-                // shortcut: renders every row (server caps at 100); virtualization is T-816.
+                // The server returns at most 100 rows per search, which are cheap to draw (T-816).
                 let rows = devices.iter().map(|d| {
                     let selected = self.selected == Some(d.id);
                     let (id, host) = (d.id, d.hostname.clone());
@@ -3003,7 +3013,7 @@ impl Console {
         })
     }
 
-    fn files_view(&self) -> Element<'_, Message> {
+    fn files_view<'a>(&'a self) -> Element<'a, Message> {
         let busy = self.files_busy.is_some();
         let nav = row![
             button(text("Drives"))
@@ -3045,6 +3055,12 @@ impl Console {
                     button(text("Upload here"))
                         .style(button::primary)
                         .on_press_maybe((!busy).then_some(Message::FilesUpload)),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            );
+            col = col.push(
+                row![
                     text_input("New folder name", &self.files_new_folder)
                         .on_input(Message::FilesNewFolder)
                         .on_submit(Message::FilesMkdir)
@@ -3106,8 +3122,8 @@ impl Console {
             Some((_, Ok(l))) => l,
         };
         let drives = listing.path.is_empty();
-        // shortcut: renders every entry; folders with tens of thousands of files need T-816.
-        let rows = listing.entries.iter().map(|e| {
+        // Folders can hold tens of thousands of entries: only the rows in view are built (T-816).
+        let file_row = |e: &'a FileEntry| -> Element<'a, Message> {
             let name: Element<_> = match &self.files_rename {
                 Some((old, new)) if old == &e.name => row![
                     text_input("New name", new)
@@ -3168,18 +3184,28 @@ impl Console {
                     );
             }
             r.into()
-        });
-        col.push(scroll(column(rows).spacing(2)).height(Length::Fill))
-            .push(
-                text(format!(
-                    "{} {}",
-                    listing.entries.len(),
-                    if drives { "drives" } else { "items" }
-                ))
-                .size(12)
-                .style(text::secondary),
+        };
+        let entries = &listing.entries;
+        col.push(
+            reports::virtual_list(
+                reports::TableId::Files,
+                &self.reports.views[reports::TableId::Files as usize],
+                entries.len(),
+                30.0,
+                |pos| file_row(&entries[pos]),
             )
-            .into()
+            .height(Length::Fill),
+        )
+        .push(
+            text(format!(
+                "{} {}",
+                listing.entries.len(),
+                if drives { "drives" } else { "items" }
+            ))
+            .size(12)
+            .style(text::secondary),
+        )
+        .into()
     }
 
     fn cmd_view(&self) -> Element<'_, Message> {
@@ -3585,7 +3611,7 @@ impl Console {
             Space::new().width(80),
         ]
         .spacing(4);
-        // shortcut: renders every matching row (a few hundred); virtualize with T-816.
+        // One machine's list (a few hundred rows) is cheap to draw in full (measured, T-816).
         let rows = shown.iter().map(|a| {
             // YYYYMMDD → YYYY-MM-DD when it looks like one.
             let date = a.install_date.as_deref().map(|d| {
@@ -3952,7 +3978,7 @@ impl Console {
             Space::new().width(170),
         ]
         .spacing(4);
-        // shortcut: renders every matching row (~300); virtualize with T-816.
+        // One machine's services (~300 rows) are cheap to draw in full (measured, T-816).
         let rows = shown.iter().map(|s| {
             let ctl =
                 |a: ServiceAction| Some(Message::SvcAsk(SvcChange::Control(s.name.clone(), a)));
@@ -4118,7 +4144,7 @@ impl Console {
         ]
         .spacing(4);
 
-        // shortcut: renders every matching row (a few hundred); virtualize with T-816.
+        // One machine's list (a few hundred rows) is cheap to draw in full (measured, T-816).
         let rows = shown.iter().map(|p| {
             row![
                 text(&p.name).size(13).width(Length::FillPortion(4)),

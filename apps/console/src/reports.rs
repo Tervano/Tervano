@@ -32,7 +32,7 @@ pub struct ReportsState {
     hardware: Option<Result<Vec<HardwareReportRow>, String>>,
     notice: Option<Result<String, String>>,
     /// Scroll and sort of each [`TableId`], indexed by it.
-    pub(crate) views: [TableView; 4],
+    pub(crate) views: [TableView; 5],
 }
 
 impl ReportsState {
@@ -45,7 +45,7 @@ impl ReportsState {
             os: None,
             hardware: None,
             notice: None,
-            views: [TableView::default(); 4],
+            views: [TableView::default(); 5],
         }
     }
 }
@@ -384,6 +384,8 @@ pub enum TableId {
     Os,
     Hardware,
     Compliance,
+    /// The Direct file browser (T-816).
+    Files,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -421,6 +423,7 @@ fn scroll_id(id: TableId) -> iced::widget::Id {
         TableId::Os => "table-os",
         TableId::Hardware => "table-hardware",
         TableId::Compliance => "table-compliance",
+        TableId::Files => "table-files",
     })
 }
 
@@ -452,6 +455,33 @@ impl Console {
             iced::widget::scrollable::RelativeOffset::START,
         )
     }
+}
+
+/// A virtualized vertical list of fixed-height rows: only the rows in view are built (T-307,
+/// T-816). `row(pos)` builds the row at position `pos`; scrolling reports back as
+/// [`TableMsg::Scrolled`] for `id`.
+pub(crate) fn virtual_list<'a>(
+    id: TableId,
+    view: &TableView,
+    len: usize,
+    row_h: f32,
+    row: impl Fn(usize) -> Element<'a, Message>,
+) -> iced::widget::Scrollable<'a, Message> {
+    // Rows are row_h + 1 (spacing) apart; build a little more than the viewport.
+    let pitch = row_h + 1.0;
+    let first = ((view.offset / pitch).floor() as usize).min(len);
+    let shown = ((view.height / pitch).ceil() as usize + 2).min(len - first);
+    let mut body = column![Space::new().height(first as f32 * pitch)].spacing(1);
+    for pos in first..first + shown {
+        body = body.push(container(row(pos)).height(row_h).clip(true));
+    }
+    body = body.push(Space::new().height((len - first - shown) as f32 * pitch));
+    scroll(body).id(scroll_id(id)).on_scroll(move |vp| {
+        Message::Table(
+            id,
+            TableMsg::Scrolled(vp.absolute_offset().y, vp.bounds().height),
+        )
+    })
 }
 
 /// Orders numbers by value ("125.61 GB" < "1,024 GB" style values compare by their leading
@@ -519,19 +549,15 @@ pub(crate) fn table<'a>(
             if asc { o } else { o.reverse() }
         });
     }
-    // Rows are ROW_H + 1 (spacing) apart; build a little more than the viewport.
-    let pitch = ROW_H + 1.0;
-    let first = ((view.offset / pitch).floor() as usize).min(len);
-    let shown = ((view.height / pitch).ceil() as usize + 2).min(len - first);
-    let mut body = column![Space::new().height(first as f32 * pitch)].spacing(1);
-    for &i in &order[first..first + shown] {
+    let list = virtual_list(id, view, len, ROW_H, |pos| {
+        let i = order[pos];
         let values = line(
             cells(i)
                 .into_iter()
                 .map(|v| text(v).size(13).wrapping(text::Wrapping::None).into())
                 .collect(),
         );
-        let entry: Element<_> = match &on_row {
+        match &on_row {
             Some(f) => button(values)
                 .width(Length::Fill)
                 .height(ROW_H)
@@ -540,21 +566,11 @@ pub(crate) fn table<'a>(
                 .on_press(f(i))
                 .into(),
             None => container(values).height(ROW_H).padding([0, 6]).into(),
-        };
-        body = body.push(entry);
-    }
-    body = body.push(Space::new().height((len - first - shown) as f32 * pitch));
+        }
+    });
     column![
         container(header.padding([4, 6])).style(container::rounded_box),
-        scroll(body)
-            .id(scroll_id(id))
-            .on_scroll(move |vp| {
-                Message::Table(
-                    id,
-                    TableMsg::Scrolled(vp.absolute_offset().y, vp.bounds().height),
-                )
-            })
-            .height(Length::Fill),
+        list.height(Length::Fill),
     ]
     .spacing(4)
     .into()
